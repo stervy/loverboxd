@@ -226,13 +226,17 @@ export async function GET(request: NextRequest) {
     // Build unified film list from RSS (always available)
     const rssFilms = rssEntries
       .filter((e) => e.rating !== null)
-      .map((e) => ({
-        title: e.filmTitle,
-        slug: "",
-        year: e.filmYear,
-        rating: e.rating,
-        filmId: "",
-      }));
+      .map((e) => {
+        // Extract slug from link like "https://letterboxd.com/user/film/slug/"
+        const slugMatch = e.link.match(/\/film\/([^/]+)/);
+        return {
+          title: e.filmTitle,
+          slug: slugMatch?.[1] ?? "",
+          year: e.filmYear,
+          rating: e.rating,
+          filmId: "",
+        };
+      });
 
     const allFilms = useScraped ? scrapedFilms : rssFilms;
     const rated = allFilms.filter((f) => f.rating !== null);
@@ -264,6 +268,11 @@ export async function GET(request: NextRequest) {
       .sort((a, b) => b.rating! - a.rating!)
       .slice(0, 10);
 
+    const rewatchCount = rssEntries.filter((e) => e.isRewatch).length;
+
+    // Collect all unique slugs for enrichment
+    const allSlugs = [...new Set(allFilms.map((f) => f.slug).filter(Boolean))];
+
     return Response.json({
       profile,
       stats: {
@@ -274,6 +283,8 @@ export async function GET(request: NextRequest) {
         decadeDistribution: decadeDist,
         topRated,
         recentActivity,
+        rewatchCount,
+        allSlugs,
         source: useScraped ? "scraped" : "rss",
       },
     });

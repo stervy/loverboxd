@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 interface Film {
   title: string;
@@ -38,8 +38,26 @@ interface StatsData {
     decadeDistribution: Record<string, number>;
     topRated: Film[];
     recentActivity: RSSEntry[];
+    rewatchCount: number;
+    allSlugs: string[];
     source: "scraped" | "rss";
   };
+}
+
+interface FilmDetail {
+  slug: string;
+  directors: string[];
+  genres: string[];
+  actors: string[];
+}
+
+interface MatchResult {
+  username: string;
+  overlapCount: number;
+  avgDifference: number;
+  cosineSimilarity: number;
+  score: number;
+  sharedFilms: { title: string; yourRating: number; theirRating: number }[];
 }
 
 function Stars({ rating }: { rating: number }) {
@@ -79,6 +97,26 @@ function RatingBar({
   );
 }
 
+function LeaderboardItem({
+  rank,
+  name,
+  count,
+}: {
+  rank: number;
+  name: string;
+  count: number;
+}) {
+  return (
+    <div className="flex items-center gap-3 py-1.5 text-sm">
+      <span className="text-muted w-5 text-right">{rank}</span>
+      <span className="flex-1">{name}</span>
+      <span className="text-muted text-xs">
+        {count} film{count !== 1 ? "s" : ""}
+      </span>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
@@ -95,7 +133,9 @@ export default function Dashboard() {
     setData(null);
 
     try {
-      const resp = await fetch(`/api/stats?username=${encodeURIComponent(name)}`);
+      const resp = await fetch(
+        `/api/stats?username=${encodeURIComponent(name)}`
+      );
       const json = await resp.json();
       if (!resp.ok) {
         setError(json.error || "Failed to fetch stats");
@@ -112,7 +152,10 @@ export default function Dashboard() {
   return (
     <div>
       {/* Search Form */}
-      <form onSubmit={handleSubmit} className="flex gap-3 max-w-md mx-auto mb-10">
+      <form
+        onSubmit={handleSubmit}
+        className="flex gap-3 max-w-md mx-auto mb-10"
+      >
         <input
           type="text"
           value={username}
@@ -150,8 +193,114 @@ export default function Dashboard() {
   );
 }
 
-function StatsView({ data, username }: { data: StatsData; username: string }) {
+function StatsView({
+  data,
+  username,
+}: {
+  data: StatsData;
+  username: string;
+}) {
   const { profile, stats } = data;
+
+  // Enrichment state
+  const [filmDetails, setFilmDetails] = useState<FilmDetail[]>([]);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState(0);
+
+  // Match state
+  const [showMatch, setShowMatch] = useState(false);
+  const [friendName, setFriendName] = useState("");
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [matchError, setMatchError] = useState("");
+  const [matchResult, setMatchResult] = useState<MatchResult | null>(null);
+
+  // Progressive enrichment: fetch film details in batches
+  const enrichFilms = useCallback(async () => {
+    const slugs = stats.allSlugs;
+    if (!slugs || slugs.length === 0) return;
+
+    setEnriching(true);
+    setEnrichProgress(0);
+    const allDetails: FilmDetail[] = [];
+
+    for (let i = 0; i < slugs.length; i += 15) {
+      const batch = slugs.slice(i, i + 15);
+      try {
+        const resp = await fetch("/api/film-details", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slugs: batch }),
+        });
+        if (resp.ok) {
+          const json = await resp.json();
+          allDetails.push(...(json.films ?? []));
+          setFilmDetails([...allDetails]);
+        }
+      } catch {
+        // Continue with what we have
+      }
+      setEnrichProgress(Math.min(i + 15, slugs.length));
+    }
+
+    setEnriching(false);
+  }, [stats.allSlugs]);
+
+  useEffect(() => {
+    enrichFilms();
+  }, [enrichFilms]);
+
+  // Compute leaderboards from film details
+  const directorCounts = new Map<string, number>();
+  const genreCounts = new Map<string, number>();
+  const actorCounts = new Map<string, number>();
+
+  for (const film of filmDetails) {
+    for (const d of film.directors) {
+      directorCounts.set(d, (directorCounts.get(d) ?? 0) + 1);
+    }
+    for (const g of film.genres) {
+      genreCounts.set(g, (genreCounts.get(g) ?? 0) + 1);
+    }
+    for (const a of film.actors) {
+      actorCounts.set(a, (actorCounts.get(a) ?? 0) + 1);
+    }
+  }
+
+  const topDirectors = [...directorCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+  const topGenres = [...genreCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+  const topActors = [...actorCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+
+  async function handleMatch(e: React.FormEvent) {
+    e.preventDefault();
+    const friend = friendName.trim();
+    if (!friend) return;
+
+    setMatchLoading(true);
+    setMatchError("");
+    setMatchResult(null);
+
+    try {
+      const resp = await fetch(
+        `/api/match?username=${encodeURIComponent(username)}&friend=${encodeURIComponent(friend)}`
+      );
+      const json = await resp.json();
+      if (!resp.ok) {
+        setMatchError(json.error || "Failed to compare");
+      } else {
+        setMatchResult(json);
+      }
+    } catch {
+      setMatchError("Network error. Please try again.");
+    } finally {
+      setMatchLoading(false);
+    }
+  }
 
   const ratingEntries = Object.entries(stats.ratingDistribution)
     .map(([k, v]) => [parseFloat(k), v] as [number, number])
@@ -175,7 +324,9 @@ function StatsView({ data, username }: { data: StatsData; username: string }) {
               {profile.displayName || "User"}
             </h2>
             {profile.bio && (
-              <p className="text-muted text-sm mt-1 max-w-lg">{profile.bio}</p>
+              <p className="text-muted text-sm mt-1 max-w-lg">
+                {profile.bio}
+              </p>
             )}
           </div>
           <a
@@ -188,11 +339,12 @@ function StatsView({ data, username }: { data: StatsData; username: string }) {
           </a>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mt-6">
           <StatCard label="Films" value={profile.filmsWatched} />
           <StatCard label="Following" value={profile.following} />
           <StatCard label="Followers" value={profile.followers} />
           <StatCard label="Lists" value={profile.listsCount} />
+          <StatCard label="Rewatches" value={stats.rewatchCount} />
         </div>
 
         {profile.favorites.length > 0 && (
@@ -234,9 +386,15 @@ function StatsView({ data, username }: { data: StatsData; username: string }) {
 
       {stats.source === "rss" && (
         <p className="text-muted text-xs text-center">
-          Stats based on ~{stats.totalFilms} most recent diary entries via RSS.
-          For complete stats, use the{" "}
-          <a href="https://github.com/stervy/loverboxd" className="text-accent hover:text-accent-hover underline">CLI tool</a> with{" "}
+          Stats based on ~{stats.totalFilms} most recent diary entries via
+          RSS. For complete stats, use the{" "}
+          <a
+            href="https://github.com/stervy/loverboxd"
+            className="text-accent hover:text-accent-hover underline"
+          >
+            CLI tool
+          </a>{" "}
+          with{" "}
           <code className="bg-background px-1 rounded">--full</code>.
         </p>
       )}
@@ -256,6 +414,72 @@ function StatsView({ data, username }: { data: StatsData; username: string }) {
             ))}
           </div>
         </div>
+      )}
+
+      {/* Top Directors / Genres / Actors */}
+      {(enriching || filmDetails.length > 0) && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="bg-card border border-card-border rounded-xl p-6">
+            <h3 className="text-lg font-semibold mb-4">Top Directors</h3>
+            {topDirectors.length > 0 ? (
+              <div>
+                {topDirectors.map(([name, count], i) => (
+                  <LeaderboardItem
+                    key={name}
+                    rank={i + 1}
+                    name={name}
+                    count={count}
+                  />
+                ))}
+              </div>
+            ) : (
+              <EnrichingPlaceholder />
+            )}
+          </div>
+
+          <div className="bg-card border border-card-border rounded-xl p-6">
+            <h3 className="text-lg font-semibold mb-4">Top Genres</h3>
+            {topGenres.length > 0 ? (
+              <div>
+                {topGenres.map(([name, count], i) => (
+                  <LeaderboardItem
+                    key={name}
+                    rank={i + 1}
+                    name={name}
+                    count={count}
+                  />
+                ))}
+              </div>
+            ) : (
+              <EnrichingPlaceholder />
+            )}
+          </div>
+
+          <div className="bg-card border border-card-border rounded-xl p-6">
+            <h3 className="text-lg font-semibold mb-4">Top Actors</h3>
+            {topActors.length > 0 ? (
+              <div>
+                {topActors.map(([name, count], i) => (
+                  <LeaderboardItem
+                    key={name}
+                    rank={i + 1}
+                    name={name}
+                    count={count}
+                  />
+                ))}
+              </div>
+            ) : (
+              <EnrichingPlaceholder />
+            )}
+          </div>
+        </div>
+      )}
+
+      {enriching && (
+        <p className="text-muted text-xs text-center">
+          Enriching film details... {enrichProgress}/{stats.allSlugs.length}{" "}
+          films processed
+        </p>
       )}
 
       {/* Decade Distribution */}
@@ -282,7 +506,10 @@ function StatsView({ data, username }: { data: StatsData; username: string }) {
           <h3 className="text-lg font-semibold mb-4">Top Rated Films</h3>
           <div className="space-y-2">
             {stats.topRated.map((film, i) => (
-              <div key={`${film.slug}-${i}`} className="flex items-center gap-3 py-1.5">
+              <div
+                key={`${film.slug}-${i}`}
+                className="flex items-center gap-3 py-1.5"
+              >
                 <span className="text-muted text-sm w-5 text-right">
                   {i + 1}
                 </span>
@@ -341,6 +568,131 @@ function StatsView({ data, username }: { data: StatsData; username: string }) {
           </div>
         </div>
       )}
+
+      {/* Find Your Match */}
+      <div className="bg-card border border-card-border rounded-xl p-6">
+        <h3 className="text-lg font-semibold mb-2">Find Your Match</h3>
+        <p className="text-muted text-sm mb-4">
+          Compare your taste with another Letterboxd user based on shared
+          ratings.
+        </p>
+
+        {!showMatch ? (
+          <button
+            onClick={() => setShowMatch(true)}
+            className="px-5 py-2.5 rounded-lg bg-accent text-background font-semibold hover:bg-accent-hover transition-colors"
+          >
+            Compare with a friend
+          </button>
+        ) : (
+          <div>
+            <form
+              onSubmit={handleMatch}
+              className="flex gap-3 max-w-md mb-4"
+            >
+              <input
+                type="text"
+                value={friendName}
+                onChange={(e) => setFriendName(e.target.value)}
+                placeholder="Friend's Letterboxd username"
+                className="flex-1 px-4 py-2.5 rounded-lg bg-background border border-card-border text-foreground placeholder:text-muted focus:outline-none focus:border-accent transition-colors"
+              />
+              <button
+                type="submit"
+                disabled={matchLoading || !friendName.trim()}
+                className="px-5 py-2.5 rounded-lg bg-accent text-background font-semibold hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {matchLoading ? (
+                  <span className="inline-block animate-spin">
+                    &#9696;
+                  </span>
+                ) : (
+                  "Match"
+                )}
+              </button>
+            </form>
+
+            {matchError && (
+              <p className="text-red-400 text-sm mb-4">{matchError}</p>
+            )}
+
+            {matchResult && <MatchView result={matchResult} />}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MatchView({ result }: { result: MatchResult }) {
+  if (result.overlapCount === 0) {
+    return (
+      <p className="text-muted text-sm">
+        No shared rated films found with {result.username}. You need to have
+        rated some of the same films for a comparison.
+      </p>
+    );
+  }
+
+  const scoreColor =
+    result.score >= 70
+      ? "text-accent"
+      : result.score >= 40
+        ? "text-yellow-400"
+        : "text-red-400";
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="text-center">
+          <div className={`text-3xl font-bold ${scoreColor}`}>
+            {result.score}%
+          </div>
+          <div className="text-muted text-xs mt-1">Match Score</div>
+        </div>
+        <div className="text-center">
+          <div className="text-2xl font-bold">{result.overlapCount}</div>
+          <div className="text-muted text-xs mt-1">Shared Films</div>
+        </div>
+        <div className="text-center">
+          <div className="text-2xl font-bold">{result.avgDifference}</div>
+          <div className="text-muted text-xs mt-1">Avg Rating Diff</div>
+        </div>
+        <div className="text-center">
+          <div className="text-2xl font-bold">{result.cosineSimilarity}</div>
+          <div className="text-muted text-xs mt-1">Cosine Similarity</div>
+        </div>
+      </div>
+
+      {result.sharedFilms.length > 0 && (
+        <div>
+          <p className="text-sm text-muted mb-2">Shared Films:</p>
+          <div className="space-y-1.5">
+            {result.sharedFilms.map((film) => (
+              <div
+                key={film.title}
+                className="flex items-center gap-3 text-sm"
+              >
+                <span className="flex-1 truncate">{film.title}</span>
+                <span className="text-muted shrink-0">
+                  You: <Stars rating={film.yourRating} />
+                </span>
+                <span className="text-muted shrink-0">
+                  Them: <Stars rating={film.theirRating} />
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EnrichingPlaceholder() {
+  return (
+    <div className="text-muted text-sm animate-pulse py-4 text-center">
+      Loading...
     </div>
   );
 }
@@ -349,7 +701,9 @@ function StatCard({ label, value }: { label: string; value: number }) {
   return (
     <div className="text-center">
       <div className="text-xl font-bold">{value.toLocaleString()}</div>
-      <div className="text-xs text-muted uppercase tracking-wide">{label}</div>
+      <div className="text-xs text-muted uppercase tracking-wide">
+        {label}
+      </div>
     </div>
   );
 }

@@ -1,21 +1,32 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+const inter = localFont({
+  src: [
+    {
+      path: "../public/fonts/Inter-Variable.woff2",
+      style: "normal",
+    },
+  ],
+  variable: "--font-inter",
+  display: "swap",
+  fallback: [
+    "-apple-system",
+    "BlinkMacSystemFont",
+    "Segoe UI",
+    "Roboto",
+    "Helvetica Neue",
+    "Arial",
+    "sans-serif",
+  ],
 });
 
 export const metadata: Metadata = {
-  title: "loverboxd — Letterboxd Stats Dashboard",
+  title: "PEPPY | Premium Peptide Wellness",
   description:
-    "See your Letterboxd stats, rating distribution, and recent activity. No API key needed.",
+    "Elevate your performance with pharmaceutical-grade NAD+ and Sermorelin. Designed for those who demand more from their bodies.",
+  keywords: ["peptides", "NAD+", "Sermorelin", "wellness", "performance", "recovery"],
 };
 
 export default function RootLayout({
@@ -24,10 +35,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
+    <html lang="en" className={`${inter.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { getCached, setCache } from "../cache";
 
 const HEADERS = {
   "User-Agent":
@@ -69,11 +70,22 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Fetch film pages in parallel (max 5 concurrent)
+  // Check cache for each slug, only fetch uncached ones
   const results: FilmDetail[] = [];
+  const uncachedSlugs: string[] = [];
 
-  for (let i = 0; i < slugs.length; i += 5) {
-    const batch = slugs.slice(i, i + 5);
+  for (const slug of slugs) {
+    const cached = getCached<FilmDetail>(`film:${slug}`);
+    if (cached) {
+      results.push(cached);
+    } else {
+      uncachedSlugs.push(slug);
+    }
+  }
+
+  // Fetch uncached film pages in parallel (max 5 concurrent)
+  for (let i = 0; i < uncachedSlugs.length; i += 5) {
+    const batch = uncachedSlugs.slice(i, i + 5);
     const settled = await Promise.allSettled(
       batch.map(async (slug) => {
         const resp = await fetch(
@@ -88,6 +100,7 @@ export async function POST(request: NextRequest) {
     );
     for (const r of settled) {
       if (r.status === "fulfilled" && r.value) {
+        setCache(`film:${r.value.slug}`, r.value, "film-details");
         results.push(r.value);
       }
     }

@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { getCached, setCache } from "../cache";
 
 const HEADERS = {
   "User-Agent":
@@ -81,6 +82,13 @@ function parseRSSForRatings(xml: string): RatedFilm[] {
 async function fetchAllRatedFilms(
   username: string
 ): Promise<{ films: RatedFilm[]; source: "scraped" | "rss" }> {
+  // Check cache first
+  const cacheKey = `films:${username.toLowerCase()}`;
+  const cached = getCached<{ films: RatedFilm[]; source: "scraped" | "rss" }>(
+    cacheKey
+  );
+  if (cached) return cached;
+
   const allFilms: RatedFilm[] = [];
   const cookies: string[] = [];
 
@@ -138,7 +146,11 @@ async function fetchAllRatedFilms(
   }
 
   // If scraping got results, use them
-  if (allFilms.length > 0) return { films: allFilms, source: "scraped" };
+  if (allFilms.length > 0) {
+    const result = { films: allFilms, source: "scraped" as const };
+    setCache(cacheKey, result, "scraped");
+    return result;
+  }
 
   // Fallback: use RSS feed (~50 most recent entries)
   try {
@@ -146,7 +158,9 @@ async function fetchAllRatedFilms(
       headers: HEADERS,
     });
     const rssXml = await rssResp.text();
-    return { films: parseRSSForRatings(rssXml), source: "rss" };
+    const result = { films: parseRSSForRatings(rssXml), source: "rss" as const };
+    setCache(cacheKey, result, "rss");
+    return result;
   } catch {
     return { films: [], source: "rss" };
   }

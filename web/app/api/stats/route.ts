@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { getCached, setCache } from "../cache";
 
 const HEADERS = {
   "User-Agent":
@@ -174,10 +175,33 @@ function parseRSS(xml: string) {
   return entries;
 }
 
+interface StatsResponse {
+  profile: ReturnType<typeof parseProfile>;
+  stats: {
+    totalRated: number;
+    totalFilms: number;
+    avgRating: number;
+    ratingDistribution: Record<number, number>;
+    decadeDistribution: Record<string, number>;
+    topRated: ReturnType<typeof parseRatedFilms>;
+    recentActivity: ReturnType<typeof parseRSS>;
+    rewatchCount: number;
+    allSlugs: string[];
+    source: "scraped" | "rss";
+  };
+}
+
 export async function GET(request: NextRequest) {
   const username = request.nextUrl.searchParams.get("username");
   if (!username || !/^[a-zA-Z0-9_-]+$/.test(username)) {
     return Response.json({ error: "Invalid username" }, { status: 400 });
+  }
+
+  // Check cache first
+  const cacheKey = `stats:${username.toLowerCase()}`;
+  const cached = getCached<StatsResponse>(cacheKey);
+  if (cached) {
+    return Response.json(cached);
   }
 
   try {
@@ -280,7 +304,8 @@ export async function GET(request: NextRequest) {
     // Collect all unique slugs for enrichment
     const allSlugs = [...new Set(allFilms.map((f) => f.slug).filter(Boolean))];
 
-    return Response.json({
+    const source = useScraped ? "scraped" : "rss";
+    const result: StatsResponse = {
       profile,
       stats: {
         totalRated: rated.length,
@@ -292,9 +317,12 @@ export async function GET(request: NextRequest) {
         recentActivity,
         rewatchCount,
         allSlugs,
-        source: useScraped ? "scraped" : "rss",
+        source,
       },
-    });
+    };
+
+    setCache(cacheKey, result, source);
+    return Response.json(result);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return Response.json({ error: message }, { status: 500 });

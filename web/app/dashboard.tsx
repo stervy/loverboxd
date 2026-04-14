@@ -416,11 +416,11 @@ function StatsView({
         </div>
       )}
 
-      {/* Top Directors / Genres / Actors */}
+      {/* Most Watched Directors / Genres / Actors */}
       {(enriching || filmDetails.length > 0) && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-card border border-card-border rounded-xl p-6">
-            <h3 className="text-lg font-semibold mb-4">Top Directors</h3>
+            <h3 className="text-lg font-semibold mb-4">Most Watched Directors</h3>
             {topDirectors.length > 0 ? (
               <div>
                 {topDirectors.map(([name, count], i) => (
@@ -438,7 +438,7 @@ function StatsView({
           </div>
 
           <div className="bg-card border border-card-border rounded-xl p-6">
-            <h3 className="text-lg font-semibold mb-4">Top Genres</h3>
+            <h3 className="text-lg font-semibold mb-4">Most Watched Genres</h3>
             {topGenres.length > 0 ? (
               <div>
                 {topGenres.map(([name, count], i) => (
@@ -456,7 +456,7 @@ function StatsView({
           </div>
 
           <div className="bg-card border border-card-border rounded-xl p-6">
-            <h3 className="text-lg font-semibold mb-4">Top Actors</h3>
+            <h3 className="text-lg font-semibold mb-4">Most Watched Actors</h3>
             {topActors.length > 0 ? (
               <div>
                 {topActors.map(([name, count], i) => (
@@ -741,7 +741,7 @@ function MatchView({ result }: { result: MatchResult }) {
         </p>
       )}
 
-      {/* Shared Top Directors / Genres / Actors */}
+      {/* Shared Most Watched Directors / Genres / Actors */}
       {(matchEnriching || matchFilmDetails.length > 0) && (
         <div>
           <h4 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">
@@ -749,7 +749,7 @@ function MatchView({ result }: { result: MatchResult }) {
           </h4>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-background rounded-lg p-4">
-              <h5 className="text-sm font-semibold mb-2">Top Directors</h5>
+              <h5 className="text-sm font-semibold mb-2">Most Watched Directors</h5>
               {topDirectors.length > 0 ? (
                 <div>
                   {topDirectors.map(([name, count], i) => (
@@ -766,7 +766,7 @@ function MatchView({ result }: { result: MatchResult }) {
               )}
             </div>
             <div className="bg-background rounded-lg p-4">
-              <h5 className="text-sm font-semibold mb-2">Top Genres</h5>
+              <h5 className="text-sm font-semibold mb-2">Most Watched Genres</h5>
               {topGenres.length > 0 ? (
                 <div>
                   {topGenres.map(([name, count], i) => (
@@ -783,7 +783,7 @@ function MatchView({ result }: { result: MatchResult }) {
               )}
             </div>
             <div className="bg-background rounded-lg p-4">
-              <h5 className="text-sm font-semibold mb-2">Top Actors</h5>
+              <h5 className="text-sm font-semibold mb-2">Most Watched Actors</h5>
               {topActors.length > 0 ? (
                 <div>
                   {topActors.map(([name, count], i) => (

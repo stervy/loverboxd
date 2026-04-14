@@ -13,6 +13,7 @@ interface RatedFilm {
   title: string;
   year: number | null;
   rating: number;
+  slug: string;
 }
 
 // Parse rated films from a Letterboxd ratings page HTML
@@ -22,6 +23,7 @@ function parseRatedFilmsFromHTML(html: string): RatedFilm[] {
   for (const item of gridItems.slice(1)) {
     const nameMatch = item.match(/data-item-full-display-name="([^"]*)"/);
     const ratingMatch = item.match(/rated-(\d+)/);
+    const linkMatch = item.match(/data-item-link="([^"]*)"/);
 
     if (!nameMatch || !ratingMatch) continue;
 
@@ -32,8 +34,11 @@ function parseRatedFilmsFromHTML(html: string): RatedFilm[] {
       : fullName;
     const year = yearMatch ? parseInt(yearMatch[1], 10) : null;
     const rating = parseInt(ratingMatch[1], 10) / 2;
+    const slug = linkMatch
+      ? linkMatch[1].replace(/^\/film\//, "").replace(/\/$/, "")
+      : "";
 
-    films.push({ title, year, rating });
+    films.push({ title, year, rating, slug });
   }
   return films;
 }
@@ -54,10 +59,15 @@ function parseRSSForRatings(xml: string): RatedFilm[] {
 
     if (!filmTitle || !ratingStr) continue;
 
+    // Extract slug from link like "https://letterboxd.com/user/film/slug/"
+    const link = get("link");
+    const slugMatch = link.match(/\/film\/([^/]+)/);
+
     films.push({
       title: filmTitle,
       year: filmYearStr ? parseInt(filmYearStr, 10) : null,
       rating: parseFloat(ratingStr),
+      slug: slugMatch?.[1] ?? "",
     });
   }
   return films;
@@ -119,18 +129,20 @@ async function fetchAllRatedFilms(username: string): Promise<RatedFilm[]> {
   }
 }
 
-function buildRatingMap(films: RatedFilm[]): Map<string, number> {
-  const map = new Map<string, number>();
+function buildRatingMap(
+  films: RatedFilm[]
+): Map<string, { rating: number; slug: string }> {
+  const map = new Map<string, { rating: number; slug: string }>();
   for (const f of films) {
     const key = `${f.title.toLowerCase()} (${f.year ?? "?"})`;
-    if (!map.has(key)) map.set(key, f.rating);
+    if (!map.has(key)) map.set(key, { rating: f.rating, slug: f.slug });
   }
   return map;
 }
 
 function cosineSimilarity(
-  a: Map<string, number>,
-  b: Map<string, number>
+  a: Map<string, { rating: number; slug: string }>,
+  b: Map<string, { rating: number; slug: string }>
 ): number {
   const shared = [...a.keys()].filter((k) => b.has(k));
   if (shared.length === 0) return 0;
@@ -138,9 +150,9 @@ function cosineSimilarity(
     magA = 0,
     magB = 0;
   for (const k of shared) {
-    dot += a.get(k)! * b.get(k)!;
-    magA += a.get(k)! ** 2;
-    magB += b.get(k)! ** 2;
+    dot += a.get(k)!.rating * b.get(k)!.rating;
+    magA += a.get(k)!.rating ** 2;
+    magB += b.get(k)!.rating ** 2;
   }
   magA = Math.sqrt(magA);
   magB = Math.sqrt(magB);
@@ -192,7 +204,7 @@ export async function GET(request: NextRequest) {
     }
 
     const diffs = sharedKeys.map((k) =>
-      Math.abs(userMap.get(k)! - friendMap.get(k)!)
+      Math.abs(userMap.get(k)!.rating - friendMap.get(k)!.rating)
     );
     const avgDiff =
       Math.round((diffs.reduce((s, d) => s + d, 0) / diffs.length) * 100) /
@@ -207,10 +219,20 @@ export async function GET(request: NextRequest) {
         (0.3 * overlapNorm + 0.3 * agreementNorm + 0.4 * cosSim) * 1000
       ) / 10;
 
+    // Collect all shared film slugs for enrichment
+    const sharedSlugs = [
+      ...new Set(
+        sharedKeys
+          .map((k) => userMap.get(k)!.slug || friendMap.get(k)!.slug)
+          .filter(Boolean)
+      ),
+    ];
+
     const sharedFilms = sharedKeys.slice(0, 15).map((k) => ({
       title: k,
-      yourRating: userMap.get(k)!,
-      theirRating: friendMap.get(k)!,
+      yourRating: userMap.get(k)!.rating,
+      theirRating: friendMap.get(k)!.rating,
+      slug: userMap.get(k)!.slug || friendMap.get(k)!.slug,
     }));
 
     return Response.json({
@@ -220,6 +242,7 @@ export async function GET(request: NextRequest) {
       cosineSimilarity: cosSim,
       score,
       sharedFilms,
+      sharedSlugs,
       userTotal: userMap.size,
       friendTotal: friendMap.size,
     });

@@ -57,7 +57,13 @@ interface MatchResult {
   avgDifference: number;
   cosineSimilarity: number;
   score: number;
-  sharedFilms: { title: string; yourRating: number; theirRating: number }[];
+  sharedFilms: {
+    title: string;
+    yourRating: number;
+    theirRating: number;
+    slug?: string;
+  }[];
+  sharedSlugs?: string[];
   userTotal?: number;
   friendTotal?: number;
 }
@@ -619,6 +625,77 @@ function StatsView({
 }
 
 function MatchView({ result }: { result: MatchResult }) {
+  const [matchFilmDetails, setMatchFilmDetails] = useState<FilmDetail[]>([]);
+  const [matchEnriching, setMatchEnriching] = useState(false);
+  const [matchEnrichProgress, setMatchEnrichProgress] = useState(0);
+
+  // Enrich shared films with directors/genres/actors
+  useEffect(() => {
+    const slugs = result.sharedSlugs;
+    if (!slugs || slugs.length === 0) return;
+
+    let cancelled = false;
+    async function enrich() {
+      setMatchEnriching(true);
+      setMatchEnrichProgress(0);
+      const allDetails: FilmDetail[] = [];
+
+      for (let i = 0; i < slugs!.length; i += 15) {
+        if (cancelled) break;
+        const batch = slugs!.slice(i, i + 15);
+        try {
+          const resp = await fetch("/api/film-details", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ slugs: batch }),
+          });
+          if (resp.ok) {
+            const json = await resp.json();
+            allDetails.push(...(json.films ?? []));
+            setMatchFilmDetails([...allDetails]);
+          }
+        } catch {
+          // Continue with what we have
+        }
+        setMatchEnrichProgress(Math.min(i + 15, slugs!.length));
+      }
+
+      setMatchEnriching(false);
+    }
+
+    enrich();
+    return () => {
+      cancelled = true;
+    };
+  }, [result.sharedSlugs]);
+
+  // Compute leaderboards from shared film details
+  const directorCounts = new Map<string, number>();
+  const genreCounts = new Map<string, number>();
+  const actorCounts = new Map<string, number>();
+
+  for (const film of matchFilmDetails) {
+    for (const d of film.directors) {
+      directorCounts.set(d, (directorCounts.get(d) ?? 0) + 1);
+    }
+    for (const g of film.genres) {
+      genreCounts.set(g, (genreCounts.get(g) ?? 0) + 1);
+    }
+    for (const a of film.actors) {
+      actorCounts.set(a, (actorCounts.get(a) ?? 0) + 1);
+    }
+  }
+
+  const topDirectors = [...directorCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+  const topGenres = [...genreCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+  const topActors = [...actorCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
   if (result.overlapCount === 0) {
     return (
       <p className="text-muted text-sm">
@@ -662,6 +739,74 @@ function MatchView({ result }: { result: MatchResult }) {
         <p className="text-muted text-xs text-center">
           Compared {result.userTotal ?? "?"} vs {result.friendTotal ?? "?"} rated films
         </p>
+      )}
+
+      {/* Shared Top Directors / Genres / Actors */}
+      {(matchEnriching || matchFilmDetails.length > 0) && (
+        <div>
+          <h4 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">
+            What You Both Watch
+          </h4>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-background rounded-lg p-4">
+              <h5 className="text-sm font-semibold mb-2">Top Directors</h5>
+              {topDirectors.length > 0 ? (
+                <div>
+                  {topDirectors.map(([name, count], i) => (
+                    <LeaderboardItem
+                      key={name}
+                      rank={i + 1}
+                      name={name}
+                      count={count}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <EnrichingPlaceholder />
+              )}
+            </div>
+            <div className="bg-background rounded-lg p-4">
+              <h5 className="text-sm font-semibold mb-2">Top Genres</h5>
+              {topGenres.length > 0 ? (
+                <div>
+                  {topGenres.map(([name, count], i) => (
+                    <LeaderboardItem
+                      key={name}
+                      rank={i + 1}
+                      name={name}
+                      count={count}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <EnrichingPlaceholder />
+              )}
+            </div>
+            <div className="bg-background rounded-lg p-4">
+              <h5 className="text-sm font-semibold mb-2">Top Actors</h5>
+              {topActors.length > 0 ? (
+                <div>
+                  {topActors.map(([name, count], i) => (
+                    <LeaderboardItem
+                      key={name}
+                      rank={i + 1}
+                      name={name}
+                      count={count}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <EnrichingPlaceholder />
+              )}
+            </div>
+          </div>
+          {matchEnriching && (
+            <p className="text-muted text-xs text-center mt-2">
+              Analyzing shared films... {matchEnrichProgress}/
+              {result.sharedSlugs?.length ?? 0}
+            </p>
+          )}
+        </div>
       )}
 
       {result.sharedFilms.length > 0 && (

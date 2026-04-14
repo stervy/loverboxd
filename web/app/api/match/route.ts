@@ -6,8 +6,12 @@ const HEADERS = {
   Accept:
     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
+  "X-Requested-With": "XMLHttpRequest",
   Referer: "https://letterboxd.com/",
 };
+
+const REQUEST_DELAY = 1000; // ms between requests to avoid Cloudflare rate limiting
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface RatedFilm {
   title: string;
@@ -74,13 +78,32 @@ function parseRSSForRatings(xml: string): RatedFilm[] {
 }
 
 // Scrape all rated films for a user by paginating through their ratings pages
-async function fetchAllRatedFilms(username: string): Promise<RatedFilm[]> {
+async function fetchAllRatedFilms(
+  username: string
+): Promise<{ films: RatedFilm[]; source: "scraped" | "rss" }> {
   const allFilms: RatedFilm[] = [];
   const cookies: string[] = [];
 
-  // Try scraping ratings pages (72 films per page)
+  // Warm up session with profile page first (establishes CF cookies)
+  try {
+    const warmup = await fetch(`https://letterboxd.com/${username}/`, {
+      headers: HEADERS,
+      redirect: "follow",
+    });
+    const setCookie = warmup.headers.getSetCookie?.() ?? [];
+    for (const c of setCookie) {
+      cookies.push(c.split(";")[0]);
+    }
+    await warmup.text(); // consume body
+  } catch {
+    // Continue without warmup
+  }
+
+  // Scrape ratings pages (72 films per page) with delay between requests
   try {
     for (let page = 1; page <= 100; page++) {
+      if (page > 1) await sleep(REQUEST_DELAY);
+
       const resp = await fetch(
         `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
         {
@@ -115,7 +138,7 @@ async function fetchAllRatedFilms(username: string): Promise<RatedFilm[]> {
   }
 
   // If scraping got results, use them
-  if (allFilms.length > 0) return allFilms;
+  if (allFilms.length > 0) return { films: allFilms, source: "scraped" };
 
   // Fallback: use RSS feed (~50 most recent entries)
   try {
@@ -123,9 +146,9 @@ async function fetchAllRatedFilms(username: string): Promise<RatedFilm[]> {
       headers: HEADERS,
     });
     const rssXml = await rssResp.text();
-    return parseRSSForRatings(rssXml);
+    return { films: parseRSSForRatings(rssXml), source: "rss" };
   } catch {
-    return [];
+    return { films: [], source: "rss" };
   }
 }
 
@@ -179,13 +202,15 @@ export async function GET(request: NextRequest) {
 
   try {
     // Fetch all rated films for both users in parallel
-    const [userFilms, friendFilms] = await Promise.all([
+    const [userData, friendData] = await Promise.all([
       fetchAllRatedFilms(username),
       fetchAllRatedFilms(friend),
     ]);
 
-    const userMap = buildRatingMap(userFilms);
-    const friendMap = buildRatingMap(friendFilms);
+    const userMap = buildRatingMap(userData.films);
+    const friendMap = buildRatingMap(friendData.films);
+    const dataLimited =
+      userData.source === "rss" || friendData.source === "rss";
 
     const sharedKeys = [...userMap.keys()].filter((k) => friendMap.has(k));
     const overlap = sharedKeys.length;
@@ -200,6 +225,7 @@ export async function GET(request: NextRequest) {
         sharedFilms: [],
         userTotal: userMap.size,
         friendTotal: friendMap.size,
+        dataLimited,
       });
     }
 
@@ -245,6 +271,7 @@ export async function GET(request: NextRequest) {
       sharedSlugs,
       userTotal: userMap.size,
       friendTotal: friendMap.size,
+      dataLimited,
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";

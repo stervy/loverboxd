@@ -66,6 +66,7 @@ interface MatchResult {
   sharedSlugs?: string[];
   userTotal?: number;
   friendTotal?: number;
+  dataLimited?: boolean;
 }
 
 function Stars({ rating }: { rating: number }) {
@@ -393,10 +394,15 @@ function StatsView({
       </div>
 
       {stats.source === "rss" && (
-        <p className="text-muted text-xs text-center">
-          Note: Stats may be limited due to Cloudflare restrictions. If
-          numbers look low, try again in a moment.
-        </p>
+        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg px-4 py-3 text-center">
+          <p className="text-yellow-300 text-sm font-medium">
+            Limited data — showing ~{stats.totalFilms} most recent films only
+          </p>
+          <p className="text-yellow-300/70 text-xs mt-1">
+            Cloudflare blocked full scraping. Most Watched Directors, Genres, and Actors
+            may be incomplete. Try again in a few minutes for full results.
+          </p>
+        </div>
       )}
 
       {/* Rating Distribution */}
@@ -739,6 +745,18 @@ function MatchView({ result }: { result: MatchResult }) {
         <p className="text-muted text-xs text-center">
           Compared {result.userTotal ?? "?"} vs {result.friendTotal ?? "?"} rated films
         </p>
+      )}
+
+      {result.dataLimited && (
+        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg px-4 py-3 text-center">
+          <p className="text-yellow-300 text-sm font-medium">
+            Limited data — results based on ~50 most recent films per user
+          </p>
+          <p className="text-yellow-300/70 text-xs mt-1">
+            Cloudflare blocked full scraping for one or both users. Try again
+            in a few minutes for more accurate results.
+          </p>
+        </div>
       )}
 
       {/* Shared Most Watched Directors / Genres / Actors */}

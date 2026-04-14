@@ -10,6 +10,9 @@ const HEADERS = {
   Referer: "https://letterboxd.com/",
 };
 
+const REQUEST_DELAY = 1000; // ms between requests to avoid Cloudflare rate limiting
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function fetchPage(url: string, cookies: string[]): Promise<string> {
   const cookieHeader = cookies.join("; ");
   const resp = await fetch(url, {
@@ -207,6 +210,8 @@ export async function GET(request: NextRequest) {
     const scrapedFilms: ReturnType<typeof parseRatedFilms> = [];
     try {
       for (let page = 1; page <= 100; page++) {
+        if (page > 1) await sleep(REQUEST_DELAY);
+
         const html = await fetchPage(
           `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
           cookies

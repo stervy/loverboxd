@@ -203,10 +203,10 @@ export async function GET(request: NextRequest) {
     const rssXml = await rssResp.text();
     const rssEntries = parseRSS(rssXml);
 
-    // 3. Try to scrape rated films pages (may fail due to Cloudflare)
+    // 3. Scrape ALL rated films pages (may fail due to Cloudflare)
     const scrapedFilms: ReturnType<typeof parseRatedFilms> = [];
     try {
-      for (let page = 1; page <= 3; page++) {
+      for (let page = 1; page <= 100; page++) {
         const html = await fetchPage(
           `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
           cookies
@@ -215,6 +215,8 @@ export async function GET(request: NextRequest) {
         const films = parseRatedFilms(html);
         if (films.length === 0) break;
         scrapedFilms.push(...films);
+        // Fewer than a full page means we've reached the end
+        if (films.length < 72) break;
       }
     } catch {
       // Cloudflare blocked — fall through to RSS-based stats

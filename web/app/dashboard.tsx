@@ -58,6 +58,8 @@ interface MatchResult {
   cosineSimilarity: number;
   score: number;
   sharedFilms: { title: string; yourRating: number; theirRating: number }[];
+  userTotal?: number;
+  friendTotal?: number;
 }
 
 function Stars({ rating }: { rating: number }) {
@@ -386,16 +388,8 @@ function StatsView({
 
       {stats.source === "rss" && (
         <p className="text-muted text-xs text-center">
-          Stats based on ~{stats.totalFilms} most recent diary entries via
-          RSS. For complete stats, use the{" "}
-          <a
-            href="https://github.com/stervy/loverboxd"
-            className="text-accent hover:text-accent-hover underline"
-          >
-            CLI tool
-          </a>{" "}
-          with{" "}
-          <code className="bg-background px-1 rounded">--full</code>.
+          Note: Stats may be limited due to Cloudflare restrictions. If
+          numbers look low, try again in a moment.
         </p>
       )}
 
@@ -663,6 +657,12 @@ function MatchView({ result }: { result: MatchResult }) {
           <div className="text-muted text-xs mt-1">Cosine Similarity</div>
         </div>
       </div>
+
+      {(result.userTotal || result.friendTotal) && (
+        <p className="text-muted text-xs text-center">
+          Compared {result.userTotal ?? "?"} vs {result.friendTotal ?? "?"} rated films
+        </p>
+      )}
 
       {result.sharedFilms.length > 0 && (
         <div>

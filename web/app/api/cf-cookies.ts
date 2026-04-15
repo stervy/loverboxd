@@ -67,10 +67,15 @@ export async function getCFCookies(): Promise<{
   }
 
   // Dynamic imports to keep cold starts fast
-  const chromium = (await import("@sparticuz/chromium")).default;
+  const chromium = (await import("@sparticuz/chromium-min")).default;
   const puppeteer = await import("puppeteer-core");
 
   chromium.setGraphicsMode = false;
+
+  // chromium-min downloads the binary from a remote URL at runtime
+  // This avoids Vercel serverless bundling issues with the 50MB+ binary
+  const CHROMIUM_URL =
+    "https://github.com/nicholasgasior/chromium-brotli-releases/releases/download/v133.0.6943.0/chromium-v133.0.6943.0-pack.tar";
 
   const browser = await puppeteer.launch({
     args: [
@@ -80,7 +85,7 @@ export async function getCFCookies(): Promise<{
       "--no-default-browser-check",
     ],
     defaultViewport: { width: 1920, height: 1080 },
-    executablePath: await chromium.executablePath(),
+    executablePath: await chromium.executablePath(CHROMIUM_URL),
     headless: "shell",
   });
 

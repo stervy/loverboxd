@@ -14,6 +14,43 @@ let cachedSession: {
 
 const CF_COOKIE_TTL = 10 * 60 * 1000; // 10 minutes
 
+// Key stealth patches — applied via evaluateOnNewDocument before any page JS runs.
+// These cover the main signals Cloudflare checks without needing puppeteer-extra.
+const STEALTH_SCRIPTS = [
+  // 1. Remove navigator.webdriver flag
+  `Object.defineProperty(navigator, 'webdriver', { get: () => undefined });`,
+
+  // 2. Fake chrome.runtime so the page sees a real Chrome environment
+  `window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };`,
+
+  // 3. Fix permissions query for notifications
+  `const origQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+   window.navigator.permissions.query = (params) =>
+     params.name === 'notifications'
+       ? Promise.resolve({ state: Notification.permission })
+       : origQuery(params);`,
+
+  // 4. Spoof plugins (headless Chrome has none)
+  `Object.defineProperty(navigator, 'plugins', {
+     get: () => [1, 2, 3, 4, 5].map(() => ({
+       0: { type: 'application/pdf' },
+       length: 1,
+       description: 'Portable Document Format',
+       filename: 'internal-pdf-viewer',
+       name: 'Chrome PDF Plugin'
+     }))
+   });`,
+
+  // 5. Spoof languages
+  `Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });`,
+
+  // 6. Fix broken iframe contentWindow in headless
+  `const origAttachShadow = Element.prototype.attachShadow;
+   Element.prototype.attachShadow = function() {
+     return origAttachShadow.apply(this, arguments);
+   };`,
+];
+
 /**
  * Returns Cloudflare cookies + the matching User-Agent.
  * Launches headless Chrome only when the cache is empty/expired.
@@ -29,17 +66,10 @@ export async function getCFCookies(): Promise<{
     };
   }
 
-  // Dynamic imports — keeps cold starts fast for routes that don't need Puppeteer
+  // Dynamic imports to keep cold starts fast
   const chromium = (await import("@sparticuz/chromium")).default;
-  const { addExtra } = await import("puppeteer-extra");
-  const puppeteerCore = await import("puppeteer-core");
-  const StealthPlugin = (await import("puppeteer-extra-plugin-stealth"))
-    .default;
+  const puppeteer = await import("puppeteer-core");
 
-  const puppeteer = addExtra(puppeteerCore as unknown as Parameters<typeof addExtra>[0]);
-  puppeteer.use(StealthPlugin());
-
-  // Disable GPU/WebGL for serverless
   chromium.setGraphicsMode = false;
 
   const browser = await puppeteer.launch({
@@ -51,11 +81,16 @@ export async function getCFCookies(): Promise<{
     ],
     defaultViewport: { width: 1920, height: 1080 },
     executablePath: await chromium.executablePath(),
-    headless: "shell", // "shell" (old headless) is less detectable than true/"new"
+    headless: "shell",
   });
 
   try {
     const page = await browser.newPage();
+
+    // Apply stealth patches before any page JS executes
+    for (const script of STEALTH_SCRIPTS) {
+      await page.evaluateOnNewDocument(script);
+    }
 
     // Navigate to letterboxd homepage — lightest page to solve CF challenge
     await page.goto("https://letterboxd.com/", {

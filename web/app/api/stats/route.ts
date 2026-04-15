@@ -1,32 +1,16 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
+import { cfFetch } from "../cf-fetch";
 
-const HEADERS = {
+export const maxDuration = 60;
+
+const RSS_HEADERS = {
   "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "X-Requested-With": "XMLHttpRequest",
-  Referer: "https://letterboxd.com/",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
 };
 
-const REQUEST_DELAY = 1000; // ms between requests to avoid Cloudflare rate limiting
+const REQUEST_DELAY = 1500; // ms between requests to be polite
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function fetchPage(url: string, cookies: string[]): Promise<string> {
-  const cookieHeader = cookies.join("; ");
-  const resp = await fetch(url, {
-    headers: { ...HEADERS, ...(cookieHeader ? { Cookie: cookieHeader } : {}) },
-    redirect: "follow",
-  });
-  // Capture set-cookie headers
-  const setCookie = resp.headers.getSetCookie?.() ?? [];
-  for (const c of setCookie) {
-    cookies.push(c.split(";")[0]);
-  }
-  return resp.text();
-}
 
 function parseProfile(html: string, username: string) {
   // displayname has nested spans: <span class="displayname ..."><span class="label">Name</span></span>
@@ -205,12 +189,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const cookies: string[] = [];
-
-    // 1. Warm up session with profile page
-    const profileHtml = await fetchPage(
-      `https://letterboxd.com/${username}/`,
-      cookies
+    // 1. Fetch profile page via CF-authenticated fetch
+    const profileHtml = await cfFetch(
+      `https://letterboxd.com/${username}/`
     );
 
     if (profileHtml.includes("Just a moment")) {
@@ -222,23 +203,22 @@ export async function GET(request: NextRequest) {
 
     const profile = parseProfile(profileHtml, username);
 
-    // 2. Fetch RSS feed (always works, no Cloudflare)
+    // 2. Fetch RSS feed (always works as fallback)
     const rssResp = await fetch(
       `https://letterboxd.com/${username}/rss/`,
-      { headers: HEADERS }
+      { headers: RSS_HEADERS }
     );
     const rssXml = await rssResp.text();
     const rssEntries = parseRSS(rssXml);
 
-    // 3. Scrape ALL rated films pages (may fail due to Cloudflare)
+    // 3. Scrape ALL rated films pages using CF cookies
     const scrapedFilms: ReturnType<typeof parseRatedFilms> = [];
     try {
       for (let page = 1; page <= 100; page++) {
         if (page > 1) await sleep(REQUEST_DELAY);
 
-        const html = await fetchPage(
-          `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
-          cookies
+        const html = await cfFetch(
+          `https://letterboxd.com/${username}/films/ratings/page/${page}/`
         );
         if (html.includes("Just a moment")) break;
         const films = parseRatedFilms(html);

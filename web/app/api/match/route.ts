@@ -1,14 +1,12 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
+import { cfFetch } from "../cf-fetch";
 
-const HEADERS = {
+export const maxDuration = 60;
+
+const RSS_HEADERS = {
   "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "X-Requested-With": "XMLHttpRequest",
-  Referer: "https://letterboxd.com/",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
 };
 
 const REQUEST_DELAY = 1000; // ms between requests to avoid Cloudflare rate limiting
@@ -90,46 +88,15 @@ async function fetchAllRatedFilms(
   if (cached) return cached;
 
   const allFilms: RatedFilm[] = [];
-  const cookies: string[] = [];
 
-  // Warm up session with profile page first (establishes CF cookies)
-  try {
-    const warmup = await fetch(`https://letterboxd.com/${username}/`, {
-      headers: HEADERS,
-      redirect: "follow",
-    });
-    const setCookie = warmup.headers.getSetCookie?.() ?? [];
-    for (const c of setCookie) {
-      cookies.push(c.split(";")[0]);
-    }
-    await warmup.text(); // consume body
-  } catch {
-    // Continue without warmup
-  }
-
-  // Scrape ratings pages (72 films per page) with delay between requests
+  // Scrape ratings pages using CF-authenticated fetch
   try {
     for (let page = 1; page <= 100; page++) {
       if (page > 1) await sleep(REQUEST_DELAY);
 
-      const resp = await fetch(
-        `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
-        {
-          headers: {
-            ...HEADERS,
-            ...(cookies.length > 0 ? { Cookie: cookies.join("; ") } : {}),
-          },
-          redirect: "follow",
-        }
+      const html = await cfFetch(
+        `https://letterboxd.com/${username}/films/ratings/page/${page}/`
       );
-
-      // Capture cookies for session continuity
-      const setCookie = resp.headers.getSetCookie?.() ?? [];
-      for (const c of setCookie) {
-        cookies.push(c.split(";")[0]);
-      }
-
-      const html = await resp.text();
 
       // Cloudflare block — fall back to RSS
       if (html.includes("Just a moment")) break;
@@ -155,7 +122,7 @@ async function fetchAllRatedFilms(
   // Fallback: use RSS feed (~50 most recent entries)
   try {
     const rssResp = await fetch(`https://letterboxd.com/${username}/rss/`, {
-      headers: HEADERS,
+      headers: RSS_HEADERS,
     });
     const rssXml = await rssResp.text();
     const result = { films: parseRSSForRatings(rssXml), source: "rss" as const };

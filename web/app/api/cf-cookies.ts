@@ -74,8 +74,9 @@ export async function getCFCookies(): Promise<{
 
   // chromium-min downloads the binary from a remote URL at runtime
   // This avoids Vercel serverless bundling issues with the 50MB+ binary
+  // Must match the installed @sparticuz/chromium-min version
   const CHROMIUM_URL =
-    "https://github.com/nicholasgasior/chromium-brotli-releases/releases/download/v133.0.6943.0/chromium-v133.0.6943.0-pack.tar";
+    "https://github.com/Sparticuz/chromium/releases/download/v147.0.0/chromium-v147.0.0-pack.x64.tar";
 
   const browser = await puppeteer.launch({
     args: [

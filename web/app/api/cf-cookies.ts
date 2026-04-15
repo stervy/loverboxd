@@ -97,11 +97,16 @@ export async function getCFCookies(): Promise<{
       await page.evaluateOnNewDocument(script);
     }
 
+    console.log("[cf-cookies] Navigating to letterboxd.com...");
+
     // Navigate to letterboxd homepage — lightest page to solve CF challenge
     await page.goto("https://letterboxd.com/", {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
+
+    const title = await page.title();
+    console.log("[cf-cookies] Page title after load:", title);
 
     // Wait for CF challenge to resolve (title changes from "Just a moment...")
     await page.waitForFunction(
@@ -109,9 +114,22 @@ export async function getCFCookies(): Promise<{
       { timeout: 20000 }
     );
 
+    console.log("[cf-cookies] CF challenge resolved!");
+
     // Extract cookies and User-Agent
     const browserCookies = await page.cookies();
     const userAgent = await page.evaluate(() => navigator.userAgent);
+
+    const cfClearance = browserCookies.find(
+      (c: { name: string }) => c.name === "cf_clearance"
+    );
+    console.log(
+      "[cf-cookies] Got",
+      browserCookies.length,
+      "cookies, cf_clearance:",
+      cfClearance ? "YES" : "NO"
+    );
+    console.log("[cf-cookies] User-Agent:", userAgent);
 
     const cookieStrings = browserCookies.map(
       (c: { name: string; value: string }) => `${c.name}=${c.value}`

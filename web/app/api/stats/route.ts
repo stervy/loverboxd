@@ -220,14 +220,19 @@ export async function GET(request: NextRequest) {
         const html = await cfFetch(
           `https://letterboxd.com/${username}/films/ratings/page/${page}/`
         );
+        console.log(
+          `[stats] Ratings page ${page}: ${html.length} bytes, CF blocked: ${html.includes("Just a moment")}`
+        );
         if (html.includes("Just a moment")) break;
         const films = parseRatedFilms(html);
+        console.log(`[stats] Ratings page ${page}: parsed ${films.length} films`);
         if (films.length === 0) break;
         scrapedFilms.push(...films);
         // Fewer than a full page means we've reached the end
         if (films.length < 72) break;
       }
-    } catch {
+    } catch (e) {
+      console.error("[stats] Scraping error:", e instanceof Error ? e.message : e);
       // Cloudflare blocked — fall through to RSS-based stats
     }
 

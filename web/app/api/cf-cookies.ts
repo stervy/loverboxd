@@ -14,6 +14,10 @@ let cachedSession: {
 
 const CF_COOKIE_TTL = 10 * 60 * 1000; // 10 minutes
 
+// The URL to solve the CF challenge on — must match the pages we want to scrape.
+// CF cookies can be scoped per path, so solving on the homepage may not cover /films/.
+let challengeUrl = "https://letterboxd.com/films/";
+
 // Key stealth patches — applied via evaluateOnNewDocument before any page JS runs.
 // These cover the main signals Cloudflare checks without needing puppeteer-extra.
 const STEALTH_SCRIPTS = [
@@ -98,10 +102,11 @@ export async function getCFCookies(): Promise<{
       await page.evaluateOnNewDocument(script);
     }
 
-    console.log("[cf-cookies] Navigating to letterboxd.com...");
+    console.log("[cf-cookies] Navigating to", challengeUrl);
 
-    // Navigate to letterboxd homepage — lightest page to solve CF challenge
-    await page.goto("https://letterboxd.com/", {
+    // Navigate to a /films/ page to solve the CF challenge in the right context.
+    // CF cookies may be scoped per path — solving on homepage didn't cover /films/ratings/.
+    await page.goto(challengeUrl, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
@@ -153,4 +158,12 @@ export async function getCFCookies(): Promise<{
  */
 export function invalidateCFCookies(): void {
   cachedSession = null;
+}
+
+/**
+ * Set the URL to navigate to when solving the CF challenge.
+ * Call this before getCFCookies() if you need cookies for a specific path.
+ */
+export function setChallengeUrl(url: string): void {
+  challengeUrl = url;
 }

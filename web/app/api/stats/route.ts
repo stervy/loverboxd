@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
 import { cfFetch } from "../cf-fetch";
+import { setChallengeUrl } from "../cf-cookies";
 
 export const maxDuration = 60;
 
@@ -192,6 +193,9 @@ export async function GET(request: NextRequest) {
   const debug: string[] = [];
 
   try {
+    // Solve CF challenge on a ratings-like path so cookies cover /films/ratings/
+    setChallengeUrl(`https://letterboxd.com/${username}/films/ratings/page/1/`);
+
     // 1. Fetch profile page via CF-authenticated fetch
     debug.push("Fetching profile...");
     let profileHtml: string;

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { type CSVFilm, extractRatingsFromFile } from "./csv-utils";
 
 interface Film {
   title: string;
@@ -40,7 +41,7 @@ interface StatsData {
     recentActivity: RSSEntry[];
     rewatchCount: number;
     allSlugs: string[];
-    source: "scraped" | "rss";
+    source: "scraped" | "rss" | "csv";
   };
 }
 
@@ -68,6 +69,8 @@ interface MatchResult {
   friendTotal?: number;
   dataLimited?: boolean;
 }
+
+/* ---------- helper components ---------- */
 
 function Stars({ rating }: { rating: number }) {
   const full = Math.floor(rating);
@@ -125,6 +128,84 @@ function LeaderboardItem({
     </div>
   );
 }
+
+function EnrichingPlaceholder() {
+  return (
+    <div className="text-muted text-sm animate-pulse py-4 text-center">
+      Loading...
+    </div>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="text-center">
+      <div className="text-xl font-bold">{value.toLocaleString()}</div>
+      <div className="text-xs text-muted uppercase tracking-wide">
+        {label}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- CSV → StatsData merge ---------- */
+
+function mergeCSVIntoStats(
+  films: CSVFilm[],
+  original: StatsData
+): StatsData {
+  const rated = films.filter((f) => f.rating != null);
+  const avgRating =
+    rated.length > 0
+      ? Math.round(
+          (rated.reduce((s, f) => s + f.rating, 0) / rated.length) * 100
+        ) / 100
+      : 0;
+
+  const ratingDist: Record<string, number> = {};
+  for (const f of rated) {
+    const key = String(f.rating);
+    ratingDist[key] = (ratingDist[key] ?? 0) + 1;
+  }
+
+  const decadeDist: Record<string, number> = {};
+  for (const f of films) {
+    if (f.year) {
+      const decade = `${Math.floor(f.year / 10) * 10}s`;
+      decadeDist[decade] = (decadeDist[decade] ?? 0) + 1;
+    }
+  }
+
+  const topRated = [...rated]
+    .sort((a, b) => b.rating - a.rating)
+    .slice(0, 10)
+    .map((f) => ({
+      title: f.title,
+      slug: f.slug,
+      year: f.year,
+      rating: f.rating,
+      filmId: "",
+    }));
+
+  const allSlugs = [...new Set(films.map((f) => f.slug).filter(Boolean))];
+
+  return {
+    profile: original.profile,
+    stats: {
+      ...original.stats, // keep recentActivity, rewatchCount
+      totalRated: rated.length,
+      totalFilms: films.length,
+      avgRating,
+      ratingDistribution: ratingDist,
+      decadeDistribution: decadeDist,
+      topRated,
+      allSlugs,
+      source: "csv",
+    },
+  };
+}
+
+/* ========== Dashboard (root) ========== */
 
 export default function Dashboard() {
   const [username, setUsername] = useState("");
@@ -202,13 +283,24 @@ export default function Dashboard() {
   );
 }
 
+/* ========== StatsView ========== */
+
 function StatsView({
-  data,
+  data: originalData,
   username,
 }: {
   data: StatsData;
   username: string;
 }) {
+  // CSV upload state
+  const [csvFilms, setCsvFilms] = useState<CSVFilm[] | null>(null);
+  const [csvError, setCsvError] = useState("");
+  const [csvLoading, setCsvLoading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Merge CSV data when available
+  const data = csvFilms ? mergeCSVIntoStats(csvFilms, originalData) : originalData;
   const { profile, stats } = data;
 
   // Enrichment state
@@ -223,13 +315,64 @@ function StatsView({
   const [matchError, setMatchError] = useState("");
   const [matchResult, setMatchResult] = useState<MatchResult | null>(null);
 
-  // Progressive enrichment: fetch film details in batches
+  /* ---------- CSV upload handlers ---------- */
+
+  async function processFile(file: File) {
+    if (
+      !file.name.toLowerCase().endsWith(".csv") &&
+      !file.name.toLowerCase().endsWith(".zip")
+    ) {
+      setCsvError("Please upload a .zip or .csv file.");
+      return;
+    }
+
+    setCsvLoading(true);
+    setCsvError("");
+
+    try {
+      const films = await extractRatingsFromFile(file);
+      if (films.length === 0) {
+        setCsvError(
+          "No rated films found. Make sure this is your Letterboxd data export."
+        );
+        return;
+      }
+      setCsvFilms(films);
+      // Reset enrichment so it restarts with new slugs
+      setFilmDetails([]);
+      setEnrichProgress(0);
+    } catch (e) {
+      setCsvError(
+        e instanceof Error ? e.message : "Failed to read the file."
+      );
+    } finally {
+      setCsvLoading(false);
+    }
+  }
+
+  function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) processFile(file);
+    // Reset so the same file can be re-selected
+    e.target.value = "";
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  }
+
+  /* ---------- enrichment ---------- */
+
   const enrichFilms = useCallback(async () => {
     const slugs = stats.allSlugs;
     if (!slugs || slugs.length === 0) return;
 
     setEnriching(true);
     setEnrichProgress(0);
+    setFilmDetails([]);
     const allDetails: FilmDetail[] = [];
 
     for (let i = 0; i < slugs.length; i += 15) {
@@ -285,6 +428,8 @@ function StatsView({
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10);
 
+  /* ---------- match ---------- */
+
   async function handleMatch(e: React.FormEvent) {
     e.preventDefault();
     const friend = friendName.trim();
@@ -295,9 +440,29 @@ function StatsView({
     setMatchResult(null);
 
     try {
-      const resp = await fetch(
-        `/api/match?username=${encodeURIComponent(username)}&friend=${encodeURIComponent(friend)}`
-      );
+      let resp;
+      if (csvFilms) {
+        // POST user's CSV films so the server doesn't need to scrape them
+        resp = await fetch("/api/match", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username,
+            friend,
+            userFilms: csvFilms.map((f) => ({
+              title: f.title,
+              year: f.year,
+              rating: f.rating,
+              slug: f.slug,
+            })),
+          }),
+        });
+      } else {
+        resp = await fetch(
+          `/api/match?username=${encodeURIComponent(username)}&friend=${encodeURIComponent(friend)}`
+        );
+      }
+
       const json = await resp.json();
       if (!resp.ok) {
         setMatchError(json.error || "Failed to compare");
@@ -311,6 +476,8 @@ function StatsView({
     }
   }
 
+  /* ---------- derived display data ---------- */
+
   const ratingEntries = Object.entries(stats.ratingDistribution)
     .map(([k, v]) => [parseFloat(k), v] as [number, number])
     .sort((a, b) => a[0] - b[0]);
@@ -323,6 +490,7 @@ function StatsView({
     (a, b) => a[0].localeCompare(b[0])
   );
 
+  /* ---------- render ---------- */
   return (
     <div className="space-y-8">
       {/* Profile Header */}
@@ -393,14 +561,181 @@ function StatsView({
         </div>
       </div>
 
+      {/* ── CSV Upload / Data Source Banner ── */}
+
+      {/* Prominent upload prompt when data is limited (RSS only) */}
       {stats.source === "rss" && (
-        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg px-4 py-3 text-center">
-          <p className="text-yellow-300 text-sm font-medium">
-            Limited data — showing ~{stats.totalFilms} most recent films only
+        <div className="bg-card border border-accent/40 rounded-xl p-6">
+          <h3 className="text-lg font-semibold mb-1">
+            Get your complete stats
+          </h3>
+          <p className="text-muted text-sm mb-4">
+            We could only load your ~{stats.totalFilms} most recent films.
+            Upload your Letterboxd data export for stats across{" "}
+            <em>all</em> your rated films.
           </p>
-          <p className="text-yellow-300/70 text-xs mt-1">
-            Cloudflare blocked full scraping. Most Watched Directors, Genres, and Actors
-            may be incomplete. Try again in a few minutes for full results.
+
+          <ol className="text-sm space-y-2 mb-5">
+            <li className="flex gap-2">
+              <span className="text-accent font-mono font-bold">1.</span>
+              <span>
+                Open{" "}
+                <a
+                  href="https://letterboxd.com/settings/data/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-accent hover:text-accent-hover underline"
+                >
+                  letterboxd.com/settings/data/
+                </a>
+              </span>
+            </li>
+            <li className="flex gap-2">
+              <span className="text-accent font-mono font-bold">2.</span>
+              <span>
+                Click{" "}
+                <strong className="text-foreground">
+                  &ldquo;Export Your Data&rdquo;
+                </strong>
+              </span>
+            </li>
+            <li className="flex gap-2">
+              <span className="text-accent font-mono font-bold">3.</span>
+              <span>Upload the downloaded ZIP (or just ratings.csv) below</span>
+            </li>
+          </ol>
+
+          {/* Drop zone */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+            className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
+              dragOver
+                ? "border-accent bg-accent/5"
+                : "border-card-border hover:border-accent/60"
+            }`}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".zip,.csv"
+              onChange={handleFileInput}
+              className="hidden"
+            />
+            {csvLoading ? (
+              <div className="text-muted">
+                <span className="inline-block animate-spin text-xl">
+                  &#9696;
+                </span>
+                <p className="mt-2 text-sm">Processing your data...</p>
+              </div>
+            ) : (
+              <>
+                <p className="text-muted">
+                  Drop your file here, or{" "}
+                  <span className="text-accent underline">click to browse</span>
+                </p>
+                <p className="text-xs text-muted/60 mt-1">
+                  Accepts .zip or .csv
+                </p>
+              </>
+            )}
+          </div>
+
+          {csvError && (
+            <p className="text-red-400 text-sm mt-3">{csvError}</p>
+          )}
+        </div>
+      )}
+
+      {/* Smaller upload option when scraping worked */}
+      {stats.source === "scraped" && (
+        <details className="bg-card border border-card-border rounded-xl">
+          <summary className="px-6 py-4 text-sm text-muted cursor-pointer hover:text-foreground transition-colors">
+            Have your Letterboxd data export? Upload it for guaranteed complete
+            stats
+          </summary>
+          <div className="px-6 pb-5">
+            <ol className="text-sm space-y-1.5 mb-4 text-muted">
+              <li>
+                <span className="text-accent font-mono">1.</span> Open{" "}
+                <a
+                  href="https://letterboxd.com/settings/data/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-accent hover:text-accent-hover underline"
+                >
+                  letterboxd.com/settings/data/
+                </a>
+              </li>
+              <li>
+                <span className="text-accent font-mono">2.</span> Click{" "}
+                <strong className="text-foreground">
+                  &ldquo;Export Your Data&rdquo;
+                </strong>
+              </li>
+              <li>
+                <span className="text-accent font-mono">3.</span> Upload the
+                ZIP or ratings.csv below
+              </li>
+            </ol>
+
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
+                dragOver
+                  ? "border-accent bg-accent/5"
+                  : "border-card-border hover:border-accent/60"
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".zip,.csv"
+                onChange={handleFileInput}
+                className="hidden"
+              />
+              {csvLoading ? (
+                <div className="text-muted">
+                  <span className="inline-block animate-spin text-xl">
+                    &#9696;
+                  </span>
+                  <p className="mt-2 text-sm">Processing your data...</p>
+                </div>
+              ) : (
+                <p className="text-muted text-sm">
+                  Drop file here or{" "}
+                  <span className="text-accent underline">browse</span>{" "}
+                  <span className="text-muted/60">(.zip or .csv)</span>
+                </p>
+              )}
+            </div>
+
+            {csvError && (
+              <p className="text-red-400 text-sm mt-3">{csvError}</p>
+            )}
+          </div>
+        </details>
+      )}
+
+      {/* Success banner after CSV import */}
+      {stats.source === "csv" && csvFilms && (
+        <div className="bg-accent/10 border border-accent/30 rounded-lg px-4 py-3 flex items-center justify-center gap-2">
+          <span className="text-accent">&#10003;</span>
+          <p className="text-accent text-sm font-medium">
+            Loaded {csvFilms.length.toLocaleString()} rated films from your
+            export
           </p>
         </div>
       )}
@@ -426,7 +761,9 @@ function StatsView({
       {(enriching || filmDetails.length > 0) && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-card border border-card-border rounded-xl p-6">
-            <h3 className="text-lg font-semibold mb-4">Most Watched Directors</h3>
+            <h3 className="text-lg font-semibold mb-4">
+              Most Watched Directors
+            </h3>
             {topDirectors.length > 0 ? (
               <div>
                 {topDirectors.map(([name, count], i) => (
@@ -444,7 +781,9 @@ function StatsView({
           </div>
 
           <div className="bg-card border border-card-border rounded-xl p-6">
-            <h3 className="text-lg font-semibold mb-4">Most Watched Genres</h3>
+            <h3 className="text-lg font-semibold mb-4">
+              Most Watched Genres
+            </h3>
             {topGenres.length > 0 ? (
               <div>
                 {topGenres.map(([name, count], i) => (
@@ -462,7 +801,9 @@ function StatsView({
           </div>
 
           <div className="bg-card border border-card-border rounded-xl p-6">
-            <h3 className="text-lg font-semibold mb-4">Most Watched Actors</h3>
+            <h3 className="text-lg font-semibold mb-4">
+              Most Watched Actors
+            </h3>
             {topActors.length > 0 ? (
               <div>
                 {topActors.map(([name, count], i) => (
@@ -630,6 +971,8 @@ function StatsView({
   );
 }
 
+/* ========== MatchView ========== */
+
 function MatchView({ result }: { result: MatchResult }) {
   const [matchFilmDetails, setMatchFilmDetails] = useState<FilmDetail[]>([]);
   const [matchEnriching, setMatchEnriching] = useState(false);
@@ -743,7 +1086,8 @@ function MatchView({ result }: { result: MatchResult }) {
 
       {(result.userTotal || result.friendTotal) && (
         <p className="text-muted text-xs text-center">
-          Compared {result.userTotal ?? "?"} vs {result.friendTotal ?? "?"} rated films
+          Compared {result.userTotal ?? "?"} vs {result.friendTotal ?? "?"}{" "}
+          rated films
         </p>
       )}
 
@@ -767,7 +1111,9 @@ function MatchView({ result }: { result: MatchResult }) {
           </h4>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-background rounded-lg p-4">
-              <h5 className="text-sm font-semibold mb-2">Most Watched Directors</h5>
+              <h5 className="text-sm font-semibold mb-2">
+                Most Watched Directors
+              </h5>
               {topDirectors.length > 0 ? (
                 <div>
                   {topDirectors.map(([name, count], i) => (
@@ -784,7 +1130,9 @@ function MatchView({ result }: { result: MatchResult }) {
               )}
             </div>
             <div className="bg-background rounded-lg p-4">
-              <h5 className="text-sm font-semibold mb-2">Most Watched Genres</h5>
+              <h5 className="text-sm font-semibold mb-2">
+                Most Watched Genres
+              </h5>
               {topGenres.length > 0 ? (
                 <div>
                   {topGenres.map(([name, count], i) => (
@@ -801,7 +1149,9 @@ function MatchView({ result }: { result: MatchResult }) {
               )}
             </div>
             <div className="bg-background rounded-lg p-4">
-              <h5 className="text-sm font-semibold mb-2">Most Watched Actors</h5>
+              <h5 className="text-sm font-semibold mb-2">
+                Most Watched Actors
+              </h5>
               {topActors.length > 0 ? (
                 <div>
                   {topActors.map(([name, count], i) => (
@@ -848,25 +1198,6 @@ function MatchView({ result }: { result: MatchResult }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function EnrichingPlaceholder() {
-  return (
-    <div className="text-muted text-sm animate-pulse py-4 text-center">
-      Loading...
-    </div>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="text-center">
-      <div className="text-xl font-bold">{value.toLocaleString()}</div>
-      <div className="text-xs text-muted uppercase tracking-wide">
-        {label}
-      </div>
     </div>
   );
 }

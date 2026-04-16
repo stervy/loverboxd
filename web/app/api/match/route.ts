@@ -196,6 +196,76 @@ function cosineSimilarity(
   return magA && magB ? dot / (magA * magB) : 0;
 }
 
+/** Shared comparison logic used by both GET and POST. */
+function compareUsers(
+  friend: string,
+  userMap: Map<string, { rating: number; slug: string }>,
+  friendMap: Map<string, { rating: number; slug: string }>,
+  dataLimited: boolean
+) {
+  const sharedKeys = [...userMap.keys()].filter((k) => friendMap.has(k));
+  const overlap = sharedKeys.length;
+
+  if (overlap === 0) {
+    return {
+      username: friend,
+      overlapCount: 0,
+      avgDifference: 0,
+      cosineSimilarity: 0,
+      score: 0,
+      sharedFilms: [],
+      userTotal: userMap.size,
+      friendTotal: friendMap.size,
+      dataLimited,
+    };
+  }
+
+  const diffs = sharedKeys.map((k) =>
+    Math.abs(userMap.get(k)!.rating - friendMap.get(k)!.rating)
+  );
+  const avgDiff =
+    Math.round((diffs.reduce((s, d) => s + d, 0) / diffs.length) * 100) /
+    100;
+  const cosSim =
+    Math.round(cosineSimilarity(userMap, friendMap) * 1000) / 1000;
+
+  const overlapNorm = Math.min(overlap / 20, 1);
+  const agreementNorm = 1 - avgDiff / 5;
+  const score =
+    Math.round(
+      (0.3 * overlapNorm + 0.3 * agreementNorm + 0.4 * cosSim) * 1000
+    ) / 10;
+
+  const sharedSlugs = [
+    ...new Set(
+      sharedKeys
+        .map((k) => userMap.get(k)!.slug || friendMap.get(k)!.slug)
+        .filter(Boolean)
+    ),
+  ];
+
+  const sharedFilms = sharedKeys.slice(0, 15).map((k) => ({
+    title: k,
+    yourRating: userMap.get(k)!.rating,
+    theirRating: friendMap.get(k)!.rating,
+    slug: userMap.get(k)!.slug || friendMap.get(k)!.slug,
+  }));
+
+  return {
+    username: friend,
+    overlapCount: overlap,
+    avgDifference: avgDiff,
+    cosineSimilarity: cosSim,
+    score,
+    sharedFilms,
+    sharedSlugs,
+    userTotal: userMap.size,
+    friendTotal: friendMap.size,
+    dataLimited,
+  };
+}
+
+/** GET — both users' data fetched server-side (original flow). */
 export async function GET(request: NextRequest) {
   const username = request.nextUrl.searchParams.get("username");
   const friend = request.nextUrl.searchParams.get("friend");
@@ -215,7 +285,6 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Fetch all rated films for both users in parallel
     const [userData, friendData] = await Promise.all([
       fetchAllRatedFilms(username),
       fetchAllRatedFilms(friend),
@@ -226,67 +295,54 @@ export async function GET(request: NextRequest) {
     const dataLimited =
       userData.source === "rss" || friendData.source === "rss";
 
-    const sharedKeys = [...userMap.keys()].filter((k) => friendMap.has(k));
-    const overlap = sharedKeys.length;
+    return Response.json(compareUsers(friend, userMap, friendMap, dataLimited));
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    return Response.json({ error: msg }, { status: 500 });
+  }
+}
 
-    if (overlap === 0) {
-      return Response.json({
-        username: friend,
-        overlapCount: 0,
-        avgDifference: 0,
-        cosineSimilarity: 0,
-        score: 0,
-        sharedFilms: [],
-        userTotal: userMap.size,
-        friendTotal: friendMap.size,
-        dataLimited,
-      });
+/** POST — user's films supplied from CSV export, friend fetched server-side. */
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { username, friend, userFilms } = body as {
+      username?: string;
+      friend?: string;
+      userFilms?: { title: string; year: number | null; rating: number; slug: string }[];
+    };
+
+    if (!username || !friend || !Array.isArray(userFilms)) {
+      return Response.json(
+        { error: "Provide username, friend, and userFilms" },
+        { status: 400 }
+      );
     }
 
-    const diffs = sharedKeys.map((k) =>
-      Math.abs(userMap.get(k)!.rating - friendMap.get(k)!.rating)
-    );
-    const avgDiff =
-      Math.round((diffs.reduce((s, d) => s + d, 0) / diffs.length) * 100) /
-      100;
-    const cosSim =
-      Math.round(cosineSimilarity(userMap, friendMap) * 1000) / 1000;
+    if (!/^[a-zA-Z0-9_-]+$/.test(friend)) {
+      return Response.json({ error: "Invalid friend username" }, { status: 400 });
+    }
 
-    const overlapNorm = Math.min(overlap / 20, 1);
-    const agreementNorm = 1 - avgDiff / 5;
-    const score =
-      Math.round(
-        (0.3 * overlapNorm + 0.3 * agreementNorm + 0.4 * cosSim) * 1000
-      ) / 10;
+    // Build user rating map from CSV data
+    const csvFilms: RatedFilm[] = userFilms
+      .filter((f) => f.title && f.rating != null)
+      .map((f) => ({
+        title: String(f.title),
+        year: f.year ?? null,
+        rating: Number(f.rating),
+        slug: String(f.slug ?? ""),
+      }));
 
-    // Collect all shared film slugs for enrichment
-    const sharedSlugs = [
-      ...new Set(
-        sharedKeys
-          .map((k) => userMap.get(k)!.slug || friendMap.get(k)!.slug)
-          .filter(Boolean)
-      ),
-    ];
+    const userMap = buildRatingMap(csvFilms);
 
-    const sharedFilms = sharedKeys.slice(0, 15).map((k) => ({
-      title: k,
-      yourRating: userMap.get(k)!.rating,
-      theirRating: friendMap.get(k)!.rating,
-      slug: userMap.get(k)!.slug || friendMap.get(k)!.slug,
-    }));
+    // Fetch friend's data server-side (scrape / RSS)
+    const friendData = await fetchAllRatedFilms(friend);
+    const friendMap = buildRatingMap(friendData.films);
 
-    return Response.json({
-      username: friend,
-      overlapCount: overlap,
-      avgDifference: avgDiff,
-      cosineSimilarity: cosSim,
-      score,
-      sharedFilms,
-      sharedSlugs,
-      userTotal: userMap.size,
-      friendTotal: friendMap.size,
-      dataLimited,
-    });
+    // User data comes from CSV so it's complete; only friend might be limited
+    const dataLimited = friendData.source === "rss";
+
+    return Response.json(compareUsers(friend, userMap, friendMap, dataLimited));
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });

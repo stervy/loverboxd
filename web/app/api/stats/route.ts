@@ -188,15 +188,28 @@ export async function GET(request: NextRequest) {
     return Response.json(cached);
   }
 
+  // Debug info to help diagnose CF bypass issues
+  const debug: string[] = [];
+
   try {
     // 1. Fetch profile page via CF-authenticated fetch
-    const profileHtml = await cfFetch(
-      `https://letterboxd.com/${username}/`
-    );
+    debug.push("Fetching profile...");
+    let profileHtml: string;
+    try {
+      profileHtml = await cfFetch(`https://letterboxd.com/${username}/`);
+      debug.push(`Profile: ${profileHtml.length} bytes, CF blocked: ${profileHtml.includes("Just a moment")}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      debug.push(`Profile cfFetch THREW: ${msg}`);
+      // Fall back to simple fetch for profile
+      const resp = await fetch(`https://letterboxd.com/${username}/`, { headers: RSS_HEADERS });
+      profileHtml = await resp.text();
+      debug.push(`Profile fallback: ${profileHtml.length} bytes, CF blocked: ${profileHtml.includes("Just a moment")}`);
+    }
 
     if (profileHtml.includes("Just a moment")) {
       return Response.json(
-        { error: "Cloudflare blocked the request. Try again." },
+        { error: "Cloudflare blocked the request. Try again.", debug },
         { status: 503 }
       );
     }
@@ -210,6 +223,7 @@ export async function GET(request: NextRequest) {
     );
     const rssXml = await rssResp.text();
     const rssEntries = parseRSS(rssXml);
+    debug.push(`RSS: ${rssEntries.length} entries`);
 
     // 3. Scrape ALL rated films pages using CF cookies
     const scrapedFilms: ReturnType<typeof parseRatedFilms> = [];
@@ -220,20 +234,18 @@ export async function GET(request: NextRequest) {
         const html = await cfFetch(
           `https://letterboxd.com/${username}/films/ratings/page/${page}/`
         );
-        console.log(
-          `[stats] Ratings page ${page}: ${html.length} bytes, CF blocked: ${html.includes("Just a moment")}`
-        );
-        if (html.includes("Just a moment")) break;
+        const cfBlocked = html.includes("Just a moment");
+        debug.push(`Ratings p${page}: ${html.length}b, CF:${cfBlocked}`);
+        if (cfBlocked) break;
         const films = parseRatedFilms(html);
-        console.log(`[stats] Ratings page ${page}: parsed ${films.length} films`);
+        debug.push(`Ratings p${page}: ${films.length} films parsed`);
         if (films.length === 0) break;
         scrapedFilms.push(...films);
-        // Fewer than a full page means we've reached the end
         if (films.length < 72) break;
       }
     } catch (e) {
-      console.error("[stats] Scraping error:", e instanceof Error ? e.message : e);
-      // Cloudflare blocked — fall through to RSS-based stats
+      const msg = e instanceof Error ? e.message : String(e);
+      debug.push(`Scraping error: ${msg}`);
     }
 
     // 4. Compute stats — use scraped films if available, otherwise RSS
@@ -307,9 +319,9 @@ export async function GET(request: NextRequest) {
     };
 
     setCache(cacheKey, result, source);
-    return Response.json(result);
+    return Response.json({ ...result, debug });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: message }, { status: 500 });
+    return Response.json({ error: message, debug }, { status: 500 });
   }
 }

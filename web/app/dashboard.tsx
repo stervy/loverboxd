@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { type CSVFilm, extractRatingsFromFile } from "./csv-utils";
 
 interface Film {
@@ -131,8 +131,9 @@ function LeaderboardItem({
 
 function EnrichingPlaceholder() {
   return (
-    <div className="text-muted text-sm animate-pulse py-4 text-center">
-      Loading...
+    <div className="text-muted text-sm py-4 text-center min-h-[200px] flex flex-col items-center justify-center gap-3">
+      <span className="inline-block animate-spin text-xl">&#9696;</span>
+      <span className="animate-pulse">Loading...</span>
     </div>
   );
 }
@@ -377,6 +378,7 @@ function StatsView({
 
     for (let i = 0; i < slugs.length; i += 15) {
       const batch = slugs.slice(i, i + 15);
+      const batchIndex = i / 15;
       try {
         const resp = await fetch("/api/film-details", {
           method: "POST",
@@ -386,13 +388,17 @@ function StatsView({
         if (resp.ok) {
           const json = await resp.json();
           allDetails.push(...(json.films ?? []));
-          setFilmDetails([...allDetails]);
+          // Update leaderboard UI every 3 batches to reduce re-renders
+          if (batchIndex % 3 === 2 || i + 15 >= slugs.length) {
+            setFilmDetails([...allDetails]);
+          }
         }
       } catch {
         // Continue with what we have
       }
       setEnrichProgress(Math.min(i + 15, slugs.length));
     }
+    setFilmDetails([...allDetails]);
 
     setEnriching(false);
   }, [stats.allSlugs]);
@@ -401,32 +407,36 @@ function StatsView({
     enrichFilms();
   }, [enrichFilms]);
 
-  // Compute leaderboards from film details
-  const directorCounts = new Map<string, number>();
-  const genreCounts = new Map<string, number>();
-  const actorCounts = new Map<string, number>();
+  // Compute leaderboards from film details (memoized to avoid recalc on unrelated renders)
+  const { topDirectors, topGenres, topActors } = useMemo(() => {
+    const directorCounts = new Map<string, number>();
+    const genreCounts = new Map<string, number>();
+    const actorCounts = new Map<string, number>();
 
-  for (const film of filmDetails) {
-    for (const d of film.directors) {
-      directorCounts.set(d, (directorCounts.get(d) ?? 0) + 1);
+    for (const film of filmDetails) {
+      for (const d of film.directors) {
+        directorCounts.set(d, (directorCounts.get(d) ?? 0) + 1);
+      }
+      for (const g of film.genres) {
+        genreCounts.set(g, (genreCounts.get(g) ?? 0) + 1);
+      }
+      for (const a of film.actors) {
+        actorCounts.set(a, (actorCounts.get(a) ?? 0) + 1);
+      }
     }
-    for (const g of film.genres) {
-      genreCounts.set(g, (genreCounts.get(g) ?? 0) + 1);
-    }
-    for (const a of film.actors) {
-      actorCounts.set(a, (actorCounts.get(a) ?? 0) + 1);
-    }
-  }
 
-  const topDirectors = [...directorCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-  const topGenres = [...genreCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-  const topActors = [...actorCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
+    return {
+      topDirectors: [...directorCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10),
+      topGenres: [...genreCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10),
+      topActors: [...actorCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10),
+    };
+  }, [filmDetails]);
 
   /* ---------- match ---------- */
 
@@ -758,7 +768,7 @@ function StatsView({
       )}
 
       {/* Most Watched Directors / Genres / Actors */}
-      {(enriching || filmDetails.length > 0) && (
+      {(stats.allSlugs?.length > 0) && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-card border border-card-border rounded-xl p-6">
             <h3 className="text-lg font-semibold mb-4">
@@ -822,12 +832,23 @@ function StatsView({
         </div>
       )}
 
-      {enriching && (
-        <p className="text-muted text-xs text-center">
-          Enriching film details... {enrichProgress}/{stats.allSlugs.length}{" "}
-          films processed
-        </p>
-      )}
+      <div className={`transition-opacity ${enriching ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
+        <div className="w-full max-w-md mx-auto">
+          <div className="flex items-center justify-center gap-2 mb-2">
+            <span className="inline-block animate-spin text-sm">&#9696;</span>
+            <p className="text-muted text-xs text-center">
+              Enriching film details... {enrichProgress}/{stats.allSlugs?.length ?? 0}{" "}
+              films processed
+            </p>
+          </div>
+          <div className="w-full bg-card-border rounded-full h-1.5 overflow-hidden">
+            <div
+              className="bg-accent h-full rounded-full transition-all duration-300"
+              style={{ width: `${stats.allSlugs?.length ? (enrichProgress / stats.allSlugs.length) * 100 : 0}%` }}
+            />
+          </div>
+        </div>
+      </div>
 
       {/* Decade Distribution */}
       {decadeEntries.length > 0 && (

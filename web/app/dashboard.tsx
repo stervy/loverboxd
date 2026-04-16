@@ -300,8 +300,11 @@ function StatsView({
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Merge CSV data when available
-  const data = csvFilms ? mergeCSVIntoStats(csvFilms, originalData) : originalData;
+  // Merge CSV data when available (memoized to keep stable references for useCallback/useEffect)
+  const data = useMemo(
+    () => (csvFilms ? mergeCSVIntoStats(csvFilms, originalData) : originalData),
+    [csvFilms, originalData]
+  );
   const { profile, stats } = data;
 
   // Enrichment state

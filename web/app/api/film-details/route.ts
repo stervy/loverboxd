@@ -13,6 +13,8 @@ interface FilmDetail {
   directors: string[];
   genres: string[];
   actors: string[];
+  runtime?: number;
+  countries?: string[];
 }
 
 function parseFilmPage(html: string, slug: string): FilmDetail {
@@ -51,7 +53,24 @@ function parseFilmPage(html: string, slug: string): FilmDetail {
     if (name && !actors.includes(name)) actors.push(name);
   }
 
-  return { slug, directors, genres, actors };
+  // Runtime — look for "123 mins" text
+  let runtime: number | undefined;
+  const runtimeMatch = html.match(/(\d+)\s*mins?/);
+  if (runtimeMatch) {
+    runtime = parseInt(runtimeMatch[1], 10);
+  }
+
+  // Countries — href="/films/country/xx/"
+  const countries: string[] = [];
+  const countryMatches = html.matchAll(
+    /href="\/films\/country\/[^"]*"[^>]*>([^<]+)</g
+  );
+  for (const m of countryMatches) {
+    const name = m[1].trim();
+    if (name && !countries.includes(name)) countries.push(name);
+  }
+
+  return { slug, directors, genres, actors, runtime, countries };
 }
 
 export async function POST(request: NextRequest) {

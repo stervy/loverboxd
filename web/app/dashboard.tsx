@@ -50,6 +50,8 @@ interface FilmDetail {
   directors: string[];
   genres: string[];
   actors: string[];
+  runtime?: number;
+  countries?: string[];
 }
 
 interface MatchResult {
@@ -439,6 +441,163 @@ function StatsView({
         .sort((a, b) => b[1] - a[1])
         .slice(0, 10),
     };
+  }, [filmDetails]);
+
+  // Build slug → rating lookup from CSV films or topRated + recentActivity
+  const ratingBySlug = useMemo(() => {
+    const map = new Map<string, number>();
+    if (csvFilms) {
+      for (const f of csvFilms) {
+        if (f.slug && f.rating != null) map.set(f.slug, f.rating);
+      }
+    } else {
+      for (const f of stats.topRated) {
+        if (f.slug && f.rating != null) map.set(f.slug, f.rating);
+      }
+      for (const e of stats.recentActivity) {
+        if (e.rating != null) {
+          const slug = e.link?.match(/\/film\/([^/]+)/)?.[1];
+          if (slug) map.set(slug, e.rating);
+        }
+      }
+    }
+    return map;
+  }, [csvFilms, stats.topRated, stats.recentActivity]);
+
+  // Build slug → year lookup
+  const yearBySlug = useMemo(() => {
+    const map = new Map<string, number>();
+    if (csvFilms) {
+      for (const f of csvFilms) {
+        if (f.slug && f.year) map.set(f.slug, f.year);
+      }
+    } else {
+      for (const f of stats.topRated) {
+        if (f.slug && f.year) map.set(f.slug, f.year);
+      }
+    }
+    return map;
+  }, [csvFilms, stats.topRated]);
+
+  // 1. Cinematic Age — rating-weighted average film year
+  const cinematicAge = useMemo(() => {
+    let weightedSum = 0;
+    let weightTotal = 0;
+    for (const [slug, rating] of ratingBySlug) {
+      const year = yearBySlug.get(slug);
+      if (year) {
+        weightedSum += year * rating;
+        weightTotal += rating;
+      }
+    }
+    if (weightTotal === 0) return null;
+    const weightedAvgYear = Math.round(weightedSum / weightTotal);
+    const estimatedBirthYear = weightedAvgYear - 18;
+    const currentYear = new Date().getFullYear();
+    const age = currentYear - estimatedBirthYear;
+    const decade = `${Math.floor(weightedAvgYear / 10) * 10}s`;
+    return { age, decade, weightedAvgYear };
+  }, [ratingBySlug, yearBySlug]);
+
+  // 2. Director-Actor Power Duos
+  const powerDuos = useMemo(() => {
+    const pairCounts = new Map<string, number>();
+    for (const film of filmDetails) {
+      for (const dir of film.directors) {
+        for (const act of film.actors) {
+          const key = `${dir}|||${act}`;
+          pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+        }
+      }
+    }
+    return [...pairCounts.entries()]
+      .filter(([, count]) => count >= 2)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([key, count]) => {
+        const [director, actor] = key.split("|||");
+        return { director, actor, count };
+      });
+  }, [filmDetails]);
+
+  // 3. Genre Taste Profile — avg rating per genre
+  const genreTaste = useMemo(() => {
+    const genreRatings = new Map<string, { sum: number; count: number }>();
+    for (const film of filmDetails) {
+      const rating = ratingBySlug.get(film.slug);
+      if (rating == null) continue;
+      for (const g of film.genres) {
+        const entry = genreRatings.get(g) ?? { sum: 0, count: 0 };
+        entry.sum += rating;
+        entry.count += 1;
+        genreRatings.set(g, entry);
+      }
+    }
+    return [...genreRatings.entries()]
+      .filter(([, v]) => v.count >= 3)
+      .map(([genre, v]) => ({ genre, avg: Math.round((v.sum / v.count) * 100) / 100, count: v.count }))
+      .sort((a, b) => b.avg - a.avg);
+  }, [filmDetails, ratingBySlug]);
+
+  // 4. Five-Star Club — common traits of top-rated films
+  const fiveStarClub = useMemo(() => {
+    const threshold = ratingBySlug.size > 0 ? 5 : 0;
+    let topSlugs = [...ratingBySlug.entries()].filter(([, r]) => r >= threshold).map(([s]) => s);
+    // Fall back to 4.5+ if fewer than 3 five-star films
+    if (topSlugs.length < 3) {
+      topSlugs = [...ratingBySlug.entries()].filter(([, r]) => r >= 4.5).map(([s]) => s);
+    }
+    if (topSlugs.length === 0) return null;
+
+    const topFilms = filmDetails.filter((f) => topSlugs.includes(f.slug));
+    const dirCounts = new Map<string, number>();
+    const genCounts = new Map<string, number>();
+    const actCounts = new Map<string, number>();
+    for (const f of topFilms) {
+      for (const d of f.directors) dirCounts.set(d, (dirCounts.get(d) ?? 0) + 1);
+      for (const g of f.genres) genCounts.set(g, (genCounts.get(g) ?? 0) + 1);
+      for (const a of f.actors) actCounts.set(a, (actCounts.get(a) ?? 0) + 1);
+    }
+
+    return {
+      count: topSlugs.length,
+      threshold: topSlugs.length === [...ratingBySlug.entries()].filter(([, r]) => r >= 5).length ? 5 : 4.5,
+      topGenres: [...genCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
+      topDirectors: [...dirCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
+      topActors: [...actCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
+    };
+  }, [filmDetails, ratingBySlug]);
+
+  // 5. Runtime Stats
+  const runtimeStats = useMemo(() => {
+    const withRuntime = filmDetails.filter((f) => f.runtime && f.runtime > 0);
+    if (withRuntime.length === 0) return null;
+    const totalMins = withRuntime.reduce((s, f) => s + (f.runtime ?? 0), 0);
+    const avgMins = Math.round(totalMins / withRuntime.length);
+    const sorted = [...withRuntime].sort((a, b) => (b.runtime ?? 0) - (a.runtime ?? 0));
+    return {
+      totalHours: Math.round(totalMins / 60),
+      avgMins,
+      longest: sorted[0],
+      shortest: sorted[sorted.length - 1],
+    };
+  }, [filmDetails]);
+
+  // 6. Country Explorer
+  const countryBreakdown = useMemo(() => {
+    const counts = new Map<string, number>();
+    let total = 0;
+    for (const film of filmDetails) {
+      for (const c of film.countries ?? []) {
+        counts.set(c, (counts.get(c) ?? 0) + 1);
+        total++;
+      }
+    }
+    if (total === 0) return [];
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([country, count]) => ({ country, count, pct: Math.round((count / total) * 100) }));
   }, [filmDetails]);
 
   /* ---------- match ---------- */
@@ -852,6 +1011,156 @@ function StatsView({
           </div>
         </div>
       </div>
+
+      {/* ---- Insights Section ---- */}
+      {filmDetails.length > 0 && (
+        <>
+          {/* Row 1: Cinematic Age + Power Duos */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Cinematic Age */}
+            {cinematicAge && (
+              <div className="bg-card border border-card-border rounded-xl p-6 text-center">
+                <h3 className="text-lg font-semibold mb-3">Your Cinematic Age</h3>
+                <div className="text-5xl font-bold text-accent mb-2">{cinematicAge.age}</div>
+                <p className="text-muted text-sm">
+                  Your taste was shaped in the <span className="text-foreground font-medium">{cinematicAge.decade}</span>
+                </p>
+              </div>
+            )}
+
+            {/* Director-Actor Power Duos */}
+            {powerDuos.length > 0 && (
+              <div className="bg-card border border-card-border rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-4">Power Duos</h3>
+                <div className="space-y-3">
+                  {powerDuos.map(({ director, actor, count }, i) => (
+                    <div key={`${director}-${actor}`} className="flex items-center gap-3">
+                      <span className="text-accent font-bold text-lg">{i + 1}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium truncate">{director} + {actor}</div>
+                        <div className="text-muted text-xs">{count} film{count !== 1 ? "s" : ""} together</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Row 2: Genre Taste Profile */}
+          {genreTaste.length > 0 && (
+            <div className="bg-card border border-card-border rounded-xl p-6">
+              <h3 className="text-lg font-semibold mb-4">Genre Taste Profile</h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                {genreTaste.map(({ genre, avg, count }) => (
+                  <div key={genre} className="bg-background rounded-lg px-3 py-2.5 text-center">
+                    <div className="text-sm font-medium truncate">{genre}</div>
+                    <div className="text-accent font-bold">{avg.toFixed(1)}<span className="text-xs text-muted">/5</span></div>
+                    <div className="text-xs text-muted">{count} films</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Row 3: 5-Star Club + Runtime Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* 5-Star Club */}
+            {fiveStarClub && fiveStarClub.count > 0 && (
+              <div className="bg-card border border-card-border rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-1">
+                  {fiveStarClub.threshold === 5 ? "5-Star" : "4.5+ Star"} Club
+                </h3>
+                <p className="text-muted text-xs mb-4">{fiveStarClub.count} films — here&apos;s what they share</p>
+                {fiveStarClub.topGenres.length > 0 && (
+                  <div className="mb-3">
+                    <div className="text-xs text-muted uppercase tracking-wide mb-1">Genres</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {fiveStarClub.topGenres.map(([name, count]) => (
+                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                          {name} ({count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {fiveStarClub.topDirectors.length > 0 && (
+                  <div className="mb-3">
+                    <div className="text-xs text-muted uppercase tracking-wide mb-1">Directors</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {fiveStarClub.topDirectors.map(([name, count]) => (
+                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                          {name} ({count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {fiveStarClub.topActors.length > 0 && (
+                  <div>
+                    <div className="text-xs text-muted uppercase tracking-wide mb-1">Actors</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {fiveStarClub.topActors.map(([name, count]) => (
+                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                          {name} ({count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Runtime Stats */}
+            {runtimeStats && (
+              <div className="bg-card border border-card-border rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-4">Runtime Stats</h3>
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-accent">{runtimeStats.totalHours.toLocaleString()}</div>
+                    <div className="text-xs text-muted">hours watched</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold">{runtimeStats.avgMins}</div>
+                    <div className="text-xs text-muted">avg minutes</div>
+                  </div>
+                </div>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-muted">Longest</span>
+                    <span>{runtimeStats.longest.slug.replace(/-/g, " ")} ({runtimeStats.longest.runtime} min)</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted">Shortest</span>
+                    <span>{runtimeStats.shortest.slug.replace(/-/g, " ")} ({runtimeStats.shortest.runtime} min)</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Row 4: Country Explorer */}
+          {countryBreakdown.length > 0 && (
+            <div className="bg-card border border-card-border rounded-xl p-6">
+              <h3 className="text-lg font-semibold mb-4">Country Explorer</h3>
+              <div className="space-y-2">
+                {countryBreakdown.map(({ country, count, pct }) => (
+                  <div key={country} className="flex items-center gap-3">
+                    <span className="text-sm w-32 truncate">{country}</span>
+                    <div className="flex-1 bg-background rounded-full h-2 overflow-hidden">
+                      <div
+                        className="bg-accent/70 h-full rounded-full"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-muted text-xs w-12 text-right">{pct}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
 
       {/* Decade Distribution */}
       {decadeEntries.length > 0 && (

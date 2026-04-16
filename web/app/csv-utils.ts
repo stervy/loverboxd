@@ -25,6 +25,46 @@ function extractSlugFromURI(uri: string): string {
   return m ? m[1] : "";
 }
 
+/** Check if the URI is a boxd.it short URL that needs redirect resolution. */
+function isShortURI(uri: string): boolean {
+  return /^https?:\/\/boxd\.it\//.test(uri.trim());
+}
+
+/**
+ * Resolve boxd.it short URLs to real film slugs via the /api/resolve-slugs endpoint.
+ * Mutates the films array in place, updating slug for any film whose URI resolved.
+ * Batched 80 URLs at a time to stay within endpoint limit (100).
+ */
+async function resolveShortURIs(films: { slug: string; _uri?: string }[]): Promise<void> {
+  const toResolve: { idx: number; uri: string }[] = [];
+  for (let i = 0; i < films.length; i++) {
+    const uri = films[i]._uri;
+    if (uri && isShortURI(uri)) toResolve.push({ idx: i, uri });
+  }
+  if (toResolve.length === 0) return;
+
+  const BATCH = 80;
+  for (let i = 0; i < toResolve.length; i += BATCH) {
+    const batch = toResolve.slice(i, i + BATCH);
+    try {
+      const resp = await fetch("/api/resolve-slugs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls: batch.map((b) => b.uri) }),
+      });
+      if (!resp.ok) continue;
+      const json = (await resp.json()) as { slugs?: (string | null)[] };
+      const resolved = json.slugs ?? [];
+      for (let j = 0; j < batch.length; j++) {
+        const newSlug = resolved[j];
+        if (newSlug) films[batch[j].idx].slug = newSlug;
+      }
+    } catch {
+      // Non-fatal — keep the title-generated slug fallback
+    }
+  }
+}
+
 /** Generate a best-effort slug from a film title. */
 function generateSlug(title: string): string {
   return title
@@ -100,7 +140,9 @@ export function parseRatingsCSV(csvText: string): CSVFilm[] {
     const year = yearNum && !isNaN(yearNum) ? yearNum : null;
     const slug = extractSlugFromURI(uri) || generateSlug(name);
 
-    films.push({ title: name, year, rating, slug });
+    // Stash the original URI so we can later resolve boxd.it short URLs.
+    // Prefixed with _ to signal it's transient — stripped before returning.
+    films.push({ title: name, year, rating, slug, _uri: uri } as CSVFilm & { _uri: string });
   }
 
   return films;
@@ -113,6 +155,7 @@ export function parseRatingsCSV(csvText: string): CSVFilm[] {
  * JSZip is dynamically imported only when a ZIP is provided.
  */
 export async function extractRatingsFromFile(file: File): Promise<CSVFilm[]> {
+  let csvText: string;
   if (file.name.toLowerCase().endsWith(".zip")) {
     const JSZip = (await import("jszip")).default;
     const zip = await JSZip.loadAsync(file);
@@ -122,11 +165,15 @@ export async function extractRatingsFromFile(file: File): Promise<CSVFilm[]> {
         "No ratings.csv found in the ZIP. Make sure this is a Letterboxd data export."
       );
     }
-    const csvText = await ratingsFile.async("text");
-    return parseRatingsCSV(csvText);
+    csvText = await ratingsFile.async("text");
+  } else {
+    csvText = await file.text();
   }
 
-  // Plain CSV
-  const csvText = await file.text();
-  return parseRatingsCSV(csvText);
+  const films = parseRatingsCSV(csvText);
+  // Resolve boxd.it short URLs to correct slugs. Falls back to title-generated
+  // slugs silently if the resolver fails.
+  await resolveShortURIs(films as (CSVFilm & { _uri?: string })[]);
+  // Strip transient _uri field before returning
+  return films.map(({ title, year, rating, slug }) => ({ title, year, rating, slug }));
 }

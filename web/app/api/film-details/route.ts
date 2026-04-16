@@ -53,9 +53,9 @@ function parseFilmPage(html: string, slug: string): FilmDetail {
     if (name && !actors.includes(name)) actors.push(name);
   }
 
-  // Runtime — look for "123 mins" text
+  // Runtime — Letterboxd renders it as "148&nbsp;mins" in the text-footer block
   let runtime: number | undefined;
-  const runtimeMatch = html.match(/(\d+)\s*mins?/);
+  const runtimeMatch = html.match(/(\d+)&nbsp;mins/);
   if (runtimeMatch) {
     runtime = parseInt(runtimeMatch[1], 10);
   }

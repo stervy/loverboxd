@@ -1,8 +1,12 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
-import { cfFetch } from "../cf-fetch";
 
-export const maxDuration = 60;
+const HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "X-Requested-With": "XMLHttpRequest",
+  Referer: "https://letterboxd.com/",
+};
 
 interface FilmDetail {
   slug: string;
@@ -84,9 +88,12 @@ export async function POST(request: NextRequest) {
     const batch = uncachedSlugs.slice(i, i + 5);
     const settled = await Promise.allSettled(
       batch.map(async (slug) => {
-        const html = await cfFetch(
-          `https://letterboxd.com/film/${encodeURIComponent(slug)}/`
+        const resp = await fetch(
+          `https://letterboxd.com/film/${encodeURIComponent(slug)}/`,
+          { headers: HEADERS }
         );
+        if (!resp.ok) return null;
+        const html = await resp.text();
         if (html.includes("Just a moment")) return null;
         return parseFilmPage(html, slug);
       })

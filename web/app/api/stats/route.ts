@@ -1,17 +1,32 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
-import { cfFetch } from "../cf-fetch";
-import { setChallengeUrl } from "../cf-cookies";
 
-export const maxDuration = 60;
-
-const RSS_HEADERS = {
+const HEADERS = {
   "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "X-Requested-With": "XMLHttpRequest",
+  Referer: "https://letterboxd.com/",
 };
 
-const REQUEST_DELAY = 1500; // ms between requests to be polite
+const REQUEST_DELAY = 1000; // ms between requests to avoid Cloudflare rate limiting
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchPage(url: string, cookies: string[]): Promise<string> {
+  const cookieHeader = cookies.join("; ");
+  const resp = await fetch(url, {
+    headers: { ...HEADERS, ...(cookieHeader ? { Cookie: cookieHeader } : {}) },
+    redirect: "follow",
+  });
+  // Capture set-cookie headers
+  const setCookie = resp.headers.getSetCookie?.() ?? [];
+  for (const c of setCookie) {
+    cookies.push(c.split(";")[0]);
+  }
+  return resp.text();
+}
 
 function parseProfile(html: string, username: string) {
   // displayname has nested spans: <span class="displayname ..."><span class="label">Name</span></span>
@@ -189,67 +204,51 @@ export async function GET(request: NextRequest) {
     return Response.json(cached);
   }
 
-  // Debug info to help diagnose CF bypass issues
-  const debug: string[] = [];
-
   try {
-    // Solve CF challenge on a ratings-like path so cookies cover /films/ratings/
-    setChallengeUrl(`https://letterboxd.com/${username}/films/ratings/page/1/`);
+    const cookies: string[] = [];
 
-    // 1. Fetch profile page via CF-authenticated fetch
-    debug.push("Fetching profile...");
-    let profileHtml: string;
-    try {
-      profileHtml = await cfFetch(`https://letterboxd.com/${username}/`);
-      debug.push(`Profile: ${profileHtml.length} bytes, CF blocked: ${profileHtml.includes("Just a moment")}`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      debug.push(`Profile cfFetch THREW: ${msg}`);
-      // Fall back to simple fetch for profile
-      const resp = await fetch(`https://letterboxd.com/${username}/`, { headers: RSS_HEADERS });
-      profileHtml = await resp.text();
-      debug.push(`Profile fallback: ${profileHtml.length} bytes, CF blocked: ${profileHtml.includes("Just a moment")}`);
-    }
+    // 1. Warm up session with profile page
+    const profileHtml = await fetchPage(
+      `https://letterboxd.com/${username}/`,
+      cookies
+    );
 
     if (profileHtml.includes("Just a moment")) {
       return Response.json(
-        { error: "Cloudflare blocked the request. Try again.", debug },
+        { error: "Cloudflare blocked the request. Try again." },
         { status: 503 }
       );
     }
 
     const profile = parseProfile(profileHtml, username);
 
-    // 2. Fetch RSS feed (always works as fallback)
+    // 2. Fetch RSS feed (always works, no Cloudflare)
     const rssResp = await fetch(
       `https://letterboxd.com/${username}/rss/`,
-      { headers: RSS_HEADERS }
+      { headers: HEADERS }
     );
     const rssXml = await rssResp.text();
     const rssEntries = parseRSS(rssXml);
-    debug.push(`RSS: ${rssEntries.length} entries`);
 
-    // 3. Scrape ALL rated films pages using CF cookies
+    // 3. Scrape ALL rated films pages (may fail due to Cloudflare)
     const scrapedFilms: ReturnType<typeof parseRatedFilms> = [];
     try {
       for (let page = 1; page <= 100; page++) {
         if (page > 1) await sleep(REQUEST_DELAY);
 
-        const html = await cfFetch(
-          `https://letterboxd.com/${username}/films/ratings/page/${page}/`
+        const html = await fetchPage(
+          `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
+          cookies
         );
-        const cfBlocked = html.includes("Just a moment");
-        debug.push(`Ratings p${page}: ${html.length}b, CF:${cfBlocked}`);
-        if (cfBlocked) break;
+        if (html.includes("Just a moment")) break;
         const films = parseRatedFilms(html);
-        debug.push(`Ratings p${page}: ${films.length} films parsed`);
         if (films.length === 0) break;
         scrapedFilms.push(...films);
+        // Fewer than a full page means we've reached the end
         if (films.length < 72) break;
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      debug.push(`Scraping error: ${msg}`);
+    } catch {
+      // Cloudflare blocked — fall through to RSS-based stats
     }
 
     // 4. Compute stats — use scraped films if available, otherwise RSS
@@ -323,9 +322,9 @@ export async function GET(request: NextRequest) {
     };
 
     setCache(cacheKey, result, source);
-    return Response.json({ ...result, debug });
+    return Response.json(result);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: message, debug }, { status: 500 });
+    return Response.json({ error: message }, { status: 500 });
   }
 }

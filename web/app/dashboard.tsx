@@ -1473,10 +1473,20 @@ function StatsView({
       {/* Find Your Match */}
       <div className="bg-card border border-card-border rounded-xl p-6">
         <h3 className="text-lg font-semibold mb-2">Find Your Match</h3>
-        <p className="text-muted text-sm mb-4">
+        <p className="text-muted text-sm mb-2">
           {hasRatings
             ? "Compare your taste with another Letterboxd user based on shared ratings."
             : "Compare your taste with another Letterboxd user using what you watch and love — ratings not required."}
+        </p>
+        {/* Heads-up on the RSS fallback: if Cloudflare blocks the full ratings
+            scrape for your friend (or their profile hasn't been cached), we
+            only get ~50 of their most recent rated films from the RSS feed.
+            A banner appears after the match when this happens. */}
+        <p className="text-muted/70 text-xs mb-4">
+          Heads up: if we can&apos;t scrape your friend&apos;s full ratings
+          page, we fall back to their RSS feed — capped at their ~50 most
+          recent rated films. You&apos;ll see a warning in the results when
+          that happens.
         </p>
 
         {!showMatch ? (

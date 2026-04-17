@@ -55,12 +55,13 @@ interface FilmDetail {
 }
 
 interface MatchResult {
+  mode?: "ratings" | "taste";
   username: string;
   overlapCount: number;
-  avgDifference: number;
-  cosineSimilarity: number;
+  avgDifference?: number;
+  cosineSimilarity?: number;
   score: number;
-  sharedFilms: {
+  sharedFilms?: {
     title: string;
     yourRating: number;
     theirRating: number;
@@ -70,6 +71,18 @@ interface MatchResult {
   userTotal?: number;
   friendTotal?: number;
   dataLimited?: boolean;
+  // Taste-mode fields
+  breakdown?: {
+    watchedJaccard: number;
+    likedOverlap: number;
+    watchlistBridge: number;
+    sharedLoved: number;
+  };
+  bothLoved?: string[];
+  bothWatched?: string[];
+  theyLovedYouHavent?: string[];
+  userLikes?: number;
+  friendLikes?: number;
 }
 
 /* ---------- helper components ---------- */
@@ -157,7 +170,9 @@ function mergeCSVIntoStats(
   films: CSVFilm[],
   original: StatsData
 ): StatsData {
-  const rated = films.filter((f) => f.rating != null);
+  const rated = films.filter(
+    (f): f is CSVFilm & { rating: number } => f.rating != null
+  );
   const avgRating =
     rated.length > 0
       ? Math.round(
@@ -206,6 +221,15 @@ function mergeCSVIntoStats(
       source: "csv",
     },
   };
+}
+
+/** Did this user provide meaningful star ratings? Governs the rating-mode UI. */
+function usersHasRatings(
+  csvFilms: CSVFilm[] | null,
+  stats: StatsData["stats"]
+): boolean {
+  if (csvFilms) return csvFilms.some((f) => f.rating != null);
+  return stats.totalRated > 0;
 }
 
 /* ========== Dashboard (root) ========== */
@@ -339,7 +363,7 @@ function StatsView({
       const films = await extractRatingsFromFile(file);
       if (films.length === 0) {
         setCsvError(
-          "No rated films found. Make sure this is your Letterboxd data export."
+          "No films found. Make sure this is your Letterboxd data export (ZIP or ratings.csv)."
         );
         return;
       }
@@ -614,7 +638,18 @@ function StatsView({
     try {
       let resp;
       if (csvFilms) {
-        // POST user's CSV films so the server doesn't need to scrape them
+        // POST user's CSV films so the server doesn't need to scrape them.
+        // Include liked + watchlist slugs so the server can run taste-mode
+        // scoring without having to re-scrape those pages for our own user.
+        const userLikedSlugs = csvFilms
+          .filter((f) => f.liked)
+          .map((f) => f.slug)
+          .filter(Boolean);
+        const userWatchlistSlugs = csvFilms
+          .filter((f) => f.watchlisted)
+          .map((f) => f.slug)
+          .filter(Boolean);
+
         resp = await fetch("/api/match", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -627,6 +662,8 @@ function StatsView({
               rating: f.rating,
               slug: f.slug,
             })),
+            userLikedSlugs,
+            userWatchlistSlugs,
           }),
         });
       } else {
@@ -650,6 +687,8 @@ function StatsView({
 
   /* ---------- derived display data ---------- */
 
+  const hasRatings = usersHasRatings(csvFilms, stats);
+
   const ratingEntries = Object.entries(stats.ratingDistribution)
     .map(([k, v]) => [parseFloat(k), v] as [number, number])
     .sort((a, b) => a[0] - b[0]);
@@ -661,6 +700,72 @@ function StatsView({
   const decadeEntries = Object.entries(stats.decadeDistribution).sort(
     (a, b) => a[0].localeCompare(b[0])
   );
+
+  // No-ratings variants: decade fingerprint derived from ALL films (not weighted).
+  // Replaces the ratings-only "Cinematic Age" when the user has no stars.
+  const decadeFingerprint = useMemo(() => {
+    if (hasRatings) return null;
+    const years: number[] = [];
+    if (csvFilms) {
+      for (const f of csvFilms) if (f.year) years.push(f.year);
+    } else {
+      for (const f of stats.topRated) if (f.year) years.push(f.year);
+    }
+    if (years.length === 0) return null;
+    const avg = Math.round(years.reduce((s, y) => s + y, 0) / years.length);
+    const decade = `${Math.floor(avg / 10) * 10}s`;
+    // Spread (standard deviation) — low = "you only watch one era", high = "eclectic".
+    const variance =
+      years.reduce((s, y) => s + (y - avg) ** 2, 0) / years.length;
+    const spread = Math.round(Math.sqrt(variance));
+    return { avgYear: avg, decade, spread, count: years.length };
+  }, [hasRatings, csvFilms, stats.topRated]);
+
+  // Watchlist vs. Watched "completionist" stat — only meaningful with CSV data
+  // that includes the watchlist.csv column. Null otherwise.
+  const watchlistStats = useMemo(() => {
+    if (!csvFilms) return null;
+    const watchlistSlugs = new Set(
+      csvFilms.filter((f) => f.watchlisted).map((f) => f.slug)
+    );
+    if (watchlistSlugs.size === 0) return null;
+    // Watchlist entries are films NOT yet watched, so no overlap by construction
+    // unless the user has since watched them and left them on the list. Report
+    // total watchlist size and estimate "completion" as (watched ∩ historic watchlist),
+    // but since we only have current state, surface the count as-is.
+    return {
+      watchlistSize: watchlistSlugs.size,
+      likedSize: csvFilms.filter((f) => f.liked).length,
+    };
+  }, [csvFilms]);
+
+  // "Liked Films Club" — when we have likes but no ratings, analyze what the
+  // user's hearted films have in common (genres, directors, actors).
+  const likedFilmsClub = useMemo(() => {
+    if (hasRatings) return null;
+    if (!csvFilms) return null;
+    const likedSlugs = new Set(
+      csvFilms.filter((f) => f.liked).map((f) => f.slug)
+    );
+    if (likedSlugs.size === 0) return null;
+
+    const likedFilms = filmDetails.filter((f) => likedSlugs.has(f.slug));
+    const dirCounts = new Map<string, number>();
+    const genCounts = new Map<string, number>();
+    const actCounts = new Map<string, number>();
+    for (const f of likedFilms) {
+      for (const d of f.directors) dirCounts.set(d, (dirCounts.get(d) ?? 0) + 1);
+      for (const g of f.genres) genCounts.set(g, (genCounts.get(g) ?? 0) + 1);
+      for (const a of f.actors) actCounts.set(a, (actCounts.get(a) ?? 0) + 1);
+    }
+
+    return {
+      count: likedSlugs.size,
+      topGenres: [...genCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
+      topDirectors: [...dirCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
+      topActors: [...actCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
+    };
+  }, [hasRatings, csvFilms, filmDetails]);
 
   /* ---------- render ---------- */
   return (
@@ -715,22 +820,48 @@ function StatsView({
         )}
       </div>
 
-      {/* Stats Row */}
+      {/* Stats Row — swap rating-centric tiles for watched/liked/watchlist when
+           the user doesn't use star ratings. */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-card border border-card-border rounded-xl p-5 text-center">
-          <div className="text-3xl font-bold text-accent">
-            {stats.avgRating}
-          </div>
-          <div className="text-muted text-sm mt-1">Average Rating</div>
-        </div>
-        <div className="bg-card border border-card-border rounded-xl p-5 text-center">
-          <div className="text-3xl font-bold">{stats.totalRated}</div>
-          <div className="text-muted text-sm mt-1">Films Rated</div>
-        </div>
-        <div className="bg-card border border-card-border rounded-xl p-5 text-center">
-          <div className="text-3xl font-bold">{stats.totalFilms}</div>
-          <div className="text-muted text-sm mt-1">Total Tracked</div>
-        </div>
+        {hasRatings ? (
+          <>
+            <div className="bg-card border border-card-border rounded-xl p-5 text-center">
+              <div className="text-3xl font-bold text-accent">
+                {stats.avgRating}
+              </div>
+              <div className="text-muted text-sm mt-1">Average Rating</div>
+            </div>
+            <div className="bg-card border border-card-border rounded-xl p-5 text-center">
+              <div className="text-3xl font-bold">{stats.totalRated}</div>
+              <div className="text-muted text-sm mt-1">Films Rated</div>
+            </div>
+            <div className="bg-card border border-card-border rounded-xl p-5 text-center">
+              <div className="text-3xl font-bold">{stats.totalFilms}</div>
+              <div className="text-muted text-sm mt-1">Total Tracked</div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="bg-card border border-card-border rounded-xl p-5 text-center">
+              <div className="text-3xl font-bold text-accent">
+                {stats.totalFilms.toLocaleString()}
+              </div>
+              <div className="text-muted text-sm mt-1">Films Watched</div>
+            </div>
+            <div className="bg-card border border-card-border rounded-xl p-5 text-center">
+              <div className="text-3xl font-bold">
+                {watchlistStats?.likedSize ?? "—"}
+              </div>
+              <div className="text-muted text-sm mt-1">Films Liked</div>
+            </div>
+            <div className="bg-card border border-card-border rounded-xl p-5 text-center">
+              <div className="text-3xl font-bold">
+                {watchlistStats?.watchlistSize ?? "—"}
+              </div>
+              <div className="text-muted text-sm mt-1">On Watchlist</div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* ── CSV Upload / Data Source Banner ── */}
@@ -743,8 +874,8 @@ function StatsView({
           </h3>
           <p className="text-muted text-sm mb-4">
             We could only load your ~{stats.totalFilms} most recent films.
-            Upload your Letterboxd data export for stats across{" "}
-            <em>all</em> your rated films.
+            Upload your Letterboxd data export (ZIP) for complete stats —
+            including likes and watchlist, so non-raters get a full profile too.
           </p>
 
           <ol className="text-sm space-y-2 mb-5">
@@ -829,8 +960,8 @@ function StatsView({
       {stats.source === "scraped" && (
         <details className="bg-card border border-card-border rounded-xl">
           <summary className="px-6 py-4 text-sm text-muted cursor-pointer hover:text-foreground transition-colors">
-            Have your Letterboxd data export? Upload it for guaranteed complete
-            stats
+            Have your Letterboxd data export? Upload the ZIP for complete stats
+            (including likes &amp; watchlist — great if you don&apos;t rate)
           </summary>
           <div className="px-6 pb-5">
             <ol className="text-sm space-y-1.5 mb-4 text-muted">
@@ -906,14 +1037,20 @@ function StatsView({
         <div className="bg-accent/10 border border-accent/30 rounded-lg px-4 py-3 flex items-center justify-center gap-2">
           <span className="text-accent">&#10003;</span>
           <p className="text-accent text-sm font-medium">
-            Loaded {csvFilms.length.toLocaleString()} rated films from your
-            export
+            Loaded {csvFilms.length.toLocaleString()} film
+            {csvFilms.length !== 1 ? "s" : ""} from your export
+            {watchlistStats && watchlistStats.likedSize > 0 && (
+              <> · {watchlistStats.likedSize} liked</>
+            )}
+            {watchlistStats && watchlistStats.watchlistSize > 0 && (
+              <> · {watchlistStats.watchlistSize} on watchlist</>
+            )}
           </p>
         </div>
       )}
 
-      {/* Rating Distribution */}
-      {ratingEntries.length > 0 && (
+      {/* Rating Distribution — only meaningful if the user rates films. */}
+      {hasRatings && ratingEntries.length > 0 && (
         <div className="bg-card border border-card-border rounded-xl p-6">
           <h3 className="text-lg font-semibold mb-4">Rating Distribution</h3>
           <div className="space-y-2">
@@ -926,6 +1063,21 @@ function StatsView({
               />
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Rating-free user banner — explains why the "star-based" cards are gone
+           and reassures them that the match + insights still work. */}
+      {!hasRatings && stats.totalFilms > 0 && (
+        <div className="bg-card border border-accent/30 rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-accent mb-1">
+            No star ratings? No problem.
+          </h3>
+          <p className="text-muted text-sm">
+            You log films without rating them — same here. We&apos;ll use your
+            watched list, likes, and watchlist to build your stats and match you
+            with friends on what you actually watch and love.
+          </p>
         </div>
       )}
 
@@ -1015,15 +1167,36 @@ function StatsView({
       {/* ---- Insights Section ---- */}
       {filmDetails.length > 0 && (
         <>
-          {/* Row 1: Cinematic Age + Power Duos */}
+          {/* Row 1: Cinematic Age (ratings) OR Decade Fingerprint (no ratings) + Power Duos */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {/* Cinematic Age */}
-            {cinematicAge && (
+            {/* Cinematic Age — rating-weighted */}
+            {hasRatings && cinematicAge && (
               <div className="bg-card border border-card-border rounded-xl p-6 text-center">
                 <h3 className="text-lg font-semibold mb-3">Your Cinematic Age</h3>
                 <div className="text-5xl font-bold text-accent mb-2">{cinematicAge.age}</div>
                 <p className="text-muted text-sm">
                   Your taste was shaped in the <span className="text-foreground font-medium">{cinematicAge.decade}</span>
+                </p>
+              </div>
+            )}
+
+            {/* Decade Fingerprint — rating-free equivalent: unweighted avg year + spread */}
+            {!hasRatings && decadeFingerprint && (
+              <div className="bg-card border border-card-border rounded-xl p-6 text-center">
+                <h3 className="text-lg font-semibold mb-3">Your Decade</h3>
+                <div className="text-5xl font-bold text-accent mb-2">
+                  {decadeFingerprint.decade}
+                </div>
+                <p className="text-muted text-sm">
+                  You gravitate toward films from{" "}
+                  <span className="text-foreground font-medium">
+                    {decadeFingerprint.avgYear}
+                  </span>
+                  {decadeFingerprint.spread <= 8
+                    ? " — a loyalist to one era"
+                    : decadeFingerprint.spread <= 18
+                      ? " — with a healthy range"
+                      : " — and you're all over the timeline"}
                 </p>
               </div>
             )}
@@ -1047,8 +1220,8 @@ function StatsView({
             )}
           </div>
 
-          {/* Row 2: Genre Taste Profile */}
-          {genreTaste.length > 0 && (
+          {/* Row 2: Genre Taste Profile — only shown when ratings exist (it's avg-rating per genre) */}
+          {hasRatings && genreTaste.length > 0 && (
             <div className="bg-card border border-card-border rounded-xl p-6">
               <h3 className="text-lg font-semibold mb-4">Genre Taste Profile</h3>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
@@ -1063,10 +1236,10 @@ function StatsView({
             </div>
           )}
 
-          {/* Row 3: 5-Star Club + Runtime Stats */}
+          {/* Row 3: 5-Star Club (ratings) / Liked Films Club (no ratings) + Runtime Stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {/* 5-Star Club */}
-            {fiveStarClub && fiveStarClub.count > 0 && (
+            {/* 5-Star Club — rating-based */}
+            {hasRatings && fiveStarClub && fiveStarClub.count > 0 && (
               <div className="bg-card border border-card-border rounded-xl p-6">
                 <h3 className="text-lg font-semibold mb-1">
                   {fiveStarClub.threshold === 5 ? "5-Star" : "4.5+ Star"} Club
@@ -1101,6 +1274,54 @@ function StatsView({
                     <div className="text-xs text-muted uppercase tracking-wide mb-1">Actors</div>
                     <div className="flex flex-wrap gap-1.5">
                       {fiveStarClub.topActors.map(([name, count]) => (
+                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                          {name} ({count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Liked Films Club — rating-free equivalent of 5-Star Club,
+                 using hearts instead of stars. Only shows when we have liked
+                 films (i.e. the user uploaded the full ZIP with likes/films.csv). */}
+            {!hasRatings && likedFilmsClub && likedFilmsClub.count > 0 && (
+              <div className="bg-card border border-card-border rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-1">Liked Films Club</h3>
+                <p className="text-muted text-xs mb-4">
+                  {likedFilmsClub.count} films you hearted — here&apos;s what they share
+                </p>
+                {likedFilmsClub.topGenres.length > 0 && (
+                  <div className="mb-3">
+                    <div className="text-xs text-muted uppercase tracking-wide mb-1">Genres</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {likedFilmsClub.topGenres.map(([name, count]) => (
+                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                          {name} ({count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {likedFilmsClub.topDirectors.length > 0 && (
+                  <div className="mb-3">
+                    <div className="text-xs text-muted uppercase tracking-wide mb-1">Directors</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {likedFilmsClub.topDirectors.map(([name, count]) => (
+                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                          {name} ({count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {likedFilmsClub.topActors.length > 0 && (
+                  <div>
+                    <div className="text-xs text-muted uppercase tracking-wide mb-1">Actors</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {likedFilmsClub.topActors.map(([name, count]) => (
                         <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
                           {name} ({count})
                         </span>
@@ -1181,7 +1402,7 @@ function StatsView({
       )}
 
       {/* Top Rated */}
-      {stats.topRated.length > 0 && (
+      {hasRatings && stats.topRated.length > 0 && (
         <div className="bg-card border border-card-border rounded-xl p-6">
           <h3 className="text-lg font-semibold mb-4">Top Rated Films</h3>
           <div className="space-y-2">
@@ -1253,8 +1474,9 @@ function StatsView({
       <div className="bg-card border border-card-border rounded-xl p-6">
         <h3 className="text-lg font-semibold mb-2">Find Your Match</h3>
         <p className="text-muted text-sm mb-4">
-          Compare your taste with another Letterboxd user based on shared
-          ratings.
+          {hasRatings
+            ? "Compare your taste with another Letterboxd user based on shared ratings."
+            : "Compare your taste with another Letterboxd user using what you watch and love — ratings not required."}
         </p>
 
         {!showMatch ? (
@@ -1378,7 +1600,13 @@ function MatchView({ result }: { result: MatchResult }) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
 
-  if (result.overlapCount === 0) {
+  const isTasteMode = result.mode === "taste";
+
+  if (
+    !isTasteMode &&
+    result.overlapCount === 0 &&
+    (!result.sharedFilms || result.sharedFilms.length === 0)
+  ) {
     return (
       <p className="text-muted text-sm">
         No shared rated films found with {result.username}. You need to have
@@ -1396,26 +1624,61 @@ function MatchView({ result }: { result: MatchResult }) {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <div className="text-center">
-          <div className={`text-3xl font-bold ${scoreColor}`}>
-            {result.score}%
+      {isTasteMode && result.breakdown ? (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="text-center">
+              <div className={`text-3xl font-bold ${scoreColor}`}>
+                {result.score}%
+              </div>
+              <div className="text-muted text-xs mt-1">Taste Overlap</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold">{result.overlapCount}</div>
+              <div className="text-muted text-xs mt-1">Both Watched</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold">
+                {result.bothLoved?.length ?? 0}
+              </div>
+              <div className="text-muted text-xs mt-1">Both Loved</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold">
+                {result.breakdown.likedOverlap}
+              </div>
+              <div className="text-muted text-xs mt-1">Like Similarity</div>
+            </div>
           </div>
-          <div className="text-muted text-xs mt-1">Match Score</div>
+          <div className="bg-accent/10 border border-accent/30 rounded-lg px-4 py-2 text-center">
+            <p className="text-accent text-sm">
+              Neither of you rates films — matching on what you watch and love
+              instead.
+            </p>
+          </div>
+        </>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="text-center">
+            <div className={`text-3xl font-bold ${scoreColor}`}>
+              {result.score}%
+            </div>
+            <div className="text-muted text-xs mt-1">Match Score</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-bold">{result.overlapCount}</div>
+            <div className="text-muted text-xs mt-1">Shared Films</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-bold">{result.avgDifference}</div>
+            <div className="text-muted text-xs mt-1">Avg Rating Diff</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-bold">{result.cosineSimilarity}</div>
+            <div className="text-muted text-xs mt-1">Cosine Similarity</div>
+          </div>
         </div>
-        <div className="text-center">
-          <div className="text-2xl font-bold">{result.overlapCount}</div>
-          <div className="text-muted text-xs mt-1">Shared Films</div>
-        </div>
-        <div className="text-center">
-          <div className="text-2xl font-bold">{result.avgDifference}</div>
-          <div className="text-muted text-xs mt-1">Avg Rating Diff</div>
-        </div>
-        <div className="text-center">
-          <div className="text-2xl font-bold">{result.cosineSimilarity}</div>
-          <div className="text-muted text-xs mt-1">Cosine Similarity</div>
-        </div>
-      </div>
+      )}
 
       {(result.userTotal || result.friendTotal) && (
         <p className="text-muted text-xs text-center">
@@ -1510,7 +1773,8 @@ function MatchView({ result }: { result: MatchResult }) {
         </div>
       )}
 
-      {result.sharedFilms.length > 0 && (
+      {/* Ratings mode: side-by-side rating comparison */}
+      {!isTasteMode && result.sharedFilms && result.sharedFilms.length > 0 && (
         <div>
           <p className="text-sm text-muted mb-2">Shared Films:</p>
           <div className="space-y-1.5">
@@ -1531,6 +1795,50 @@ function MatchView({ result }: { result: MatchResult }) {
           </div>
         </div>
       )}
+
+      {/* Taste mode: "Both loved" list — strongest signal the pairing is real. */}
+      {isTasteMode && result.bothLoved && result.bothLoved.length > 0 && (
+        <div>
+          <p className="text-sm text-muted mb-2">Films you both loved:</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            {result.bothLoved.slice(0, 12).map((slug) => (
+              <a
+                key={slug}
+                href={`https://letterboxd.com/film/${slug}/`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="truncate hover:text-accent transition-colors"
+              >
+                &hearts; {slug.replace(/-/g, " ")}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Taste mode: recommendations — what they love that you haven't watched. */}
+      {isTasteMode &&
+        result.theyLovedYouHavent &&
+        result.theyLovedYouHavent.length > 0 && (
+          <div>
+            <p className="text-sm text-muted mb-2">
+              They loved — you haven&apos;t seen it yet:
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+              {result.theyLovedYouHavent.slice(0, 10).map((slug) => (
+                <a
+                  key={slug}
+                  href={`https://letterboxd.com/film/${slug}/`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="truncate hover:text-accent transition-colors"
+                >
+                  &rarr; {slug.replace(/-/g, " ")}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
     </div>
   );
 }

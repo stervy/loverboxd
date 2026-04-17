@@ -4,17 +4,23 @@
  * Letterboxd lets users export all their data as a ZIP from
  * https://letterboxd.com/settings/data/
  *
- * The ZIP contains ratings.csv with columns:
- *   Date, Name, Year, Letterboxd URI, Rating
+ * The ZIP contains multiple CSVs we care about:
+ *   ratings.csv       — Date, Name, Year, Letterboxd URI, Rating
+ *   watched.csv       — Date, Name, Year, Letterboxd URI  (every logged film)
+ *   likes/films.csv   — Date, Name, Year, Letterboxd URI  (hearted films)
+ *   watchlist.csv     — Date, Name, Year, Letterboxd URI  (films to watch)
  *
- * We accept either the ZIP or the CSV directly.
+ * We accept either the ZIP (preferred — gives us all four) or a single CSV
+ * (backward-compatible with users who only upload ratings.csv).
  */
 
 export interface CSVFilm {
   title: string;
   year: number | null;
-  rating: number;
+  rating: number | null;
   slug: string;
+  liked?: boolean;
+  watchlisted?: boolean;
 }
 
 /* ---------- slug helpers ---------- */
@@ -106,20 +112,33 @@ function parseCSVLine(line: string): string[] {
   return result;
 }
 
-/** Parse a Letterboxd ratings.csv string into an array of films. */
-export function parseRatingsCSV(csvText: string): CSVFilm[] {
+interface RawCSVRow {
+  title: string;
+  year: number | null;
+  rating: number | null;
+  slug: string;
+  _uri: string;
+}
+
+/**
+ * Parse any Letterboxd-export CSV that has the standard columns
+ * (Name, Year, Letterboxd URI, and optionally Rating). Returns one row
+ * per film. `rating` will be null for watched/likes/watchlist CSVs which
+ * don't have that column.
+ */
+function parseFilmCSV(csvText: string): RawCSVRow[] {
   const lines = csvText.split(/\r?\n/);
   if (lines.length < 2) return [];
 
   const header = parseCSVLine(lines[0]).map((h) => h.trim().toLowerCase());
   const nameIdx = header.indexOf("name");
   const yearIdx = header.indexOf("year");
-  const ratingIdx = header.indexOf("rating");
+  const ratingIdx = header.indexOf("rating"); // -1 if CSV has no rating column
   const uriIdx = header.findIndex((h) => h.includes("letterboxd uri"));
 
-  if (nameIdx === -1 || ratingIdx === -1) return [];
+  if (nameIdx === -1) return [];
 
-  const films: CSVFilm[] = [];
+  const rows: RawCSVRow[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -127,53 +146,163 @@ export function parseRatingsCSV(csvText: string): CSVFilm[] {
 
     const cols = parseCSVLine(line);
     const name = (cols[nameIdx] ?? "").trim();
+    if (!name) continue;
+
     const yearStr = yearIdx >= 0 ? (cols[yearIdx] ?? "").trim() : "";
-    const ratingStr = (cols[ratingIdx] ?? "").trim();
     const uri = uriIdx >= 0 ? (cols[uriIdx] ?? "").trim() : "";
 
-    if (!name || !ratingStr) continue;
-
-    const rating = parseFloat(ratingStr);
-    if (isNaN(rating) || rating < 0.5 || rating > 5) continue;
+    let rating: number | null = null;
+    if (ratingIdx >= 0) {
+      const ratingStr = (cols[ratingIdx] ?? "").trim();
+      if (ratingStr) {
+        const r = parseFloat(ratingStr);
+        if (!isNaN(r) && r >= 0.5 && r <= 5) rating = r;
+      }
+    }
 
     const yearNum = yearStr ? parseInt(yearStr, 10) : null;
     const year = yearNum && !isNaN(yearNum) ? yearNum : null;
     const slug = extractSlugFromURI(uri) || generateSlug(name);
 
-    // Stash the original URI so we can later resolve boxd.it short URLs.
-    // Prefixed with _ to signal it's transient — stripped before returning.
-    films.push({ title: name, year, rating, slug, _uri: uri } as CSVFilm & { _uri: string });
+    rows.push({ title: name, year, rating, slug, _uri: uri });
   }
 
-  return films;
+  return rows;
+}
+
+/**
+ * Parse ONLY ratings.csv — kept for back-compat with callers that bypass the
+ * full extractor (e.g. tests or direct-CSV uploads). Same behavior as before:
+ * rows without a valid rating are excluded.
+ */
+export function parseRatingsCSV(csvText: string): CSVFilm[] {
+  return parseFilmCSV(csvText)
+    .filter((r) => r.rating != null)
+    .map((r) => {
+      const film = { title: r.title, year: r.year, rating: r.rating, slug: r.slug } as CSVFilm;
+      (film as CSVFilm & { _uri: string })._uri = r._uri;
+      return film;
+    });
 }
 
 /* ---------- file handling ---------- */
 
 /**
- * Read a File (ZIP or CSV) and return parsed rated films.
+ * Merge four parallel CSVs (ratings/watched/likes/watchlist) into a single
+ * keyed-by-slug film list. Ratings are the richest source; watched-but-unrated
+ * films are included too so non-rating users still see their full library.
+ * `liked` and `watchlisted` booleans are joined on by slug.
+ */
+function mergeSources(
+  ratings: RawCSVRow[],
+  watched: RawCSVRow[],
+  likes: RawCSVRow[],
+  watchlist: RawCSVRow[]
+): (CSVFilm & { _uri?: string })[] {
+  const bySlug = new Map<string, CSVFilm & { _uri?: string }>();
+
+  const seed = (row: RawCSVRow) => {
+    if (!row.slug) return;
+    const existing = bySlug.get(row.slug);
+    if (existing) {
+      // Prefer the first non-null rating we find (ratings CSV wins because it's seeded first)
+      if (existing.rating == null && row.rating != null) existing.rating = row.rating;
+      if (!existing.year && row.year) existing.year = row.year;
+      if (!existing._uri && row._uri) existing._uri = row._uri;
+    } else {
+      bySlug.set(row.slug, {
+        title: row.title,
+        year: row.year,
+        rating: row.rating,
+        slug: row.slug,
+        _uri: row._uri,
+      });
+    }
+  };
+
+  // Order matters: ratings first so they seed the rating values, then watched
+  // adds any unrated films, then likes/watchlist contribute extra titles and
+  // set the booleans below.
+  for (const r of ratings) seed(r);
+  for (const r of watched) seed(r);
+  for (const r of likes) seed(r);
+  for (const r of watchlist) seed(r);
+
+  for (const r of likes) {
+    const film = bySlug.get(r.slug);
+    if (film) film.liked = true;
+  }
+  for (const r of watchlist) {
+    const film = bySlug.get(r.slug);
+    if (film) film.watchlisted = true;
+  }
+
+  return [...bySlug.values()];
+}
+
+/**
+ * Read a File (ZIP or CSV) and return parsed films.
  * JSZip is dynamically imported only when a ZIP is provided.
+ *
+ * When the user uploads the full ZIP we also pull watched/likes/watchlist so
+ * users who never rate films still get a meaningful profile.
  */
 export async function extractRatingsFromFile(file: File): Promise<CSVFilm[]> {
-  let csvText: string;
+  let films: (CSVFilm & { _uri?: string })[];
+
   if (file.name.toLowerCase().endsWith(".zip")) {
     const JSZip = (await import("jszip")).default;
     const zip = await JSZip.loadAsync(file);
-    const ratingsFile = zip.file("ratings.csv");
-    if (!ratingsFile) {
+
+    const readOptional = async (path: string): Promise<RawCSVRow[]> => {
+      const entry = zip.file(path);
+      if (!entry) return [];
+      return parseFilmCSV(await entry.async("text"));
+    };
+
+    const ratings = await readOptional("ratings.csv");
+    const watched = await readOptional("watched.csv");
+    const likes = await readOptional("likes/films.csv");
+    const watchlist = await readOptional("watchlist.csv");
+
+    if (
+      ratings.length === 0 &&
+      watched.length === 0 &&
+      likes.length === 0 &&
+      watchlist.length === 0
+    ) {
       throw new Error(
-        "No ratings.csv found in the ZIP. Make sure this is a Letterboxd data export."
+        "No film data found in the ZIP. Make sure this is a Letterboxd data export."
       );
     }
-    csvText = await ratingsFile.async("text");
+
+    films = mergeSources(ratings, watched, likes, watchlist);
   } else {
-    csvText = await file.text();
+    // Direct-CSV upload: assume ratings.csv. Unrated rows are excluded (legacy
+    // behavior) because we have no way of knowing if the CSV is watched/likes/etc.
+    const csvText = await file.text();
+    films = parseFilmCSV(csvText)
+      .filter((r) => r.rating != null)
+      .map((r) => ({
+        title: r.title,
+        year: r.year,
+        rating: r.rating,
+        slug: r.slug,
+        _uri: r._uri,
+      }));
   }
 
-  const films = parseRatingsCSV(csvText);
   // Resolve boxd.it short URLs to correct slugs. Falls back to title-generated
   // slugs silently if the resolver fails.
-  await resolveShortURIs(films as (CSVFilm & { _uri?: string })[]);
+  await resolveShortURIs(films);
+
   // Strip transient _uri field before returning
-  return films.map(({ title, year, rating, slug }) => ({ title, year, rating, slug }));
+  return films.map(({ title, year, rating, slug, liked, watchlisted }) => ({
+    title,
+    year,
+    rating,
+    slug,
+    liked,
+    watchlisted,
+  }));
 }

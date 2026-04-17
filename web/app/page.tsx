@@ -23,6 +23,20 @@ export default function Home() {
             Not affiliated with Letterboxd. Data sourced from public profiles
             and RSS feeds.
           </p>
+          {/* TMDB attribution — required by their API ToS whenever we use
+               their metadata or images. */}
+          <p className="mt-1 text-xs text-muted/70">
+            Film posters and metadata courtesy of{" "}
+            <a
+              href="https://www.themoviedb.org/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent/80 hover:text-accent underline"
+            >
+              The Movie Database (TMDB)
+            </a>
+            . This product uses the TMDB API but is not endorsed or certified by TMDB.
+          </p>
           <p className="mt-1">
             <a
               href="https://github.com/stervy/loverboxd"

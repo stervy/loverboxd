@@ -1,7 +1,17 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import Image from "next/image";
 import { type CSVFilm, extractRatingsFromFile } from "./csv-utils";
+
+/** Build a TMDB CDN URL from a poster path. Sizes: w92, w154, w185, w342, w500, w780, original. */
+function tmdbImg(
+  path: string | undefined,
+  size: "w92" | "w154" | "w185" | "w342" | "w500" | "w780" = "w185"
+): string | null {
+  if (!path) return null;
+  return `https://image.tmdb.org/t/p/${size}${path}`;
+}
 
 interface Film {
   title: string;
@@ -52,6 +62,13 @@ interface FilmDetail {
   actors: string[];
   runtime?: number;
   countries?: string[];
+  // TMDB enrichment — all optional, UI falls back to text if absent.
+  tmdbId?: number;
+  tmdbType?: "movie" | "tv";
+  posterPath?: string;
+  backdropPath?: string;
+  overview?: string;
+  tagline?: string;
 }
 
 interface MatchResult {
@@ -160,6 +177,66 @@ function StatCard({ label, value }: { label: string; value: number }) {
       <div className="text-xs text-muted uppercase tracking-wide">
         {label}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Poster thumbnail backed by TMDB. Width/height match TMDB's 2:3 aspect ratio.
+ * Falls back to a placeholder slate card with the slug when no poster is
+ * available (film page had no TMDB link, or TMDB returned no poster).
+ */
+function Poster({
+  posterPath,
+  title,
+  slug,
+  size = 60,
+  href,
+}: {
+  posterPath?: string;
+  title: string;
+  slug?: string;
+  size?: number;
+  href?: string;
+}) {
+  const url = tmdbImg(posterPath, size <= 92 ? "w92" : size <= 154 ? "w154" : "w185");
+  const width = size;
+  const height = Math.round(size * 1.5); // 2:3 poster aspect
+
+  const inner = url ? (
+    <Image
+      src={url}
+      alt={title}
+      width={width}
+      height={height}
+      className="rounded shadow-md bg-card-border object-cover"
+      unoptimized
+    />
+  ) : (
+    <div
+      className="rounded bg-card-border flex items-center justify-center text-[10px] text-muted text-center p-1 overflow-hidden"
+      style={{ width, height }}
+      title={title}
+    >
+      {title}
+    </div>
+  );
+
+  if (href) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="shrink-0 block hover:opacity-80 transition-opacity"
+      >
+        {inner}
+      </a>
+    );
+  }
+  return (
+    <div className="shrink-0" title={slug}>
+      {inner}
     </div>
   );
 }
@@ -487,6 +564,17 @@ function StatsView({
     }
     return map;
   }, [csvFilms, stats.topRated, stats.recentActivity]);
+
+  // Build slug → posterPath lookup from enriched film details. Propagates TMDB
+  // posters wherever we render a film slug in the UI. Empty until enrichment
+  // starts populating filmDetails; once it does, posters appear progressively.
+  const posterBySlug = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const f of filmDetails) {
+      if (f.posterPath) map.set(f.slug, f.posterPath);
+    }
+    return map;
+  }, [filmDetails]);
 
   // Build slug → year lookup
   const yearBySlug = useMemo(() => {
@@ -1401,32 +1489,32 @@ function StatsView({
         </div>
       )}
 
-      {/* Top Rated */}
+      {/* Top Rated — poster grid. Uses TMDB posters as they're fetched by the
+           enrichment pass; falls back to a text tile for films we couldn't map. */}
       {hasRatings && stats.topRated.length > 0 && (
         <div className="bg-card border border-card-border rounded-xl p-6">
           <h3 className="text-lg font-semibold mb-4">Top Rated Films</h3>
-          <div className="space-y-2">
+          <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-10 gap-3">
             {stats.topRated.map((film, i) => (
-              <div
+              <a
                 key={`${film.slug}-${i}`}
-                className="flex items-center gap-3 py-1.5"
+                href={`https://letterboxd.com/film/${film.slug}/`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-col items-center gap-1.5 group"
               >
-                <span className="text-muted text-sm w-5 text-right">
-                  {i + 1}
-                </span>
-                <Stars rating={film.rating!} />
-                <a
-                  href={`https://letterboxd.com/film/${film.slug}/`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:text-accent transition-colors"
-                >
-                  {film.title}
-                </a>
-                {film.year && (
-                  <span className="text-muted text-sm">({film.year})</span>
-                )}
-              </div>
+                <Poster
+                  posterPath={posterBySlug.get(film.slug)}
+                  title={film.title}
+                  size={92}
+                />
+                <div className="text-center w-full">
+                  <div className="text-xs font-medium truncate group-hover:text-accent transition-colors">
+                    {film.title}
+                  </div>
+                  <Stars rating={film.rating!} />
+                </div>
+              </a>
             ))}
           </div>
         </div>
@@ -1543,10 +1631,14 @@ function MatchView({ result }: { result: MatchResult }) {
   const [matchEnriching, setMatchEnriching] = useState(false);
   const [matchEnrichProgress, setMatchEnrichProgress] = useState(0);
 
-  // Enrich shared films with directors/genres/actors
+  // Enrich shared films with directors/genres/actors — plus in taste mode, the
+  // "they loved, you haven't seen" recommendations so we can show posters for
+  // them too (the server doesn't include those in sharedSlugs).
   useEffect(() => {
-    const slugs = result.sharedSlugs;
-    if (!slugs || slugs.length === 0) return;
+    const base = result.sharedSlugs ?? [];
+    const recs = result.theyLovedYouHavent ?? [];
+    const slugs = [...new Set([...base, ...recs])].filter(Boolean);
+    if (slugs.length === 0) return;
 
     let cancelled = false;
     async function enrich() {
@@ -1554,7 +1646,7 @@ function MatchView({ result }: { result: MatchResult }) {
       setMatchEnrichProgress(0);
       const allDetails: FilmDetail[] = [];
 
-      for (let i = 0; i < slugs!.length; i += 15) {
+      for (let i = 0; i < slugs.length; i += 15) {
         if (cancelled) break;
         const batch = slugs!.slice(i, i + 15);
         try {
@@ -1571,7 +1663,7 @@ function MatchView({ result }: { result: MatchResult }) {
         } catch {
           // Continue with what we have
         }
-        setMatchEnrichProgress(Math.min(i + 15, slugs!.length));
+        setMatchEnrichProgress(Math.min(i + 15, slugs.length));
       }
 
       setMatchEnriching(false);
@@ -1581,7 +1673,7 @@ function MatchView({ result }: { result: MatchResult }) {
     return () => {
       cancelled = true;
     };
-  }, [result.sharedSlugs]);
+  }, [result.sharedSlugs, result.theyLovedYouHavent]);
 
   // Compute leaderboards from shared film details
   const directorCounts = new Map<string, number>();
@@ -1609,6 +1701,13 @@ function MatchView({ result }: { result: MatchResult }) {
   const topActors = [...actorCounts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
+
+  // Build slug → posterPath lookup from shared-film enrichment so "Both Loved"
+  // and "They Loved You Haven't Seen" render as a poster wall instead of text.
+  const matchPosterBySlug = new Map<string, string>();
+  for (const f of matchFilmDetails) {
+    if (f.posterPath) matchPosterBySlug.set(f.slug, f.posterPath);
+  }
 
   const isTasteMode = result.mode === "taste";
 
@@ -1806,44 +1905,55 @@ function MatchView({ result }: { result: MatchResult }) {
         </div>
       )}
 
-      {/* Taste mode: "Both loved" list — strongest signal the pairing is real. */}
+      {/* Taste mode: "Both loved" — strongest signal. Render as a poster wall
+           once enrichment pulls TMDB posters; text-tile fallback otherwise. */}
       {isTasteMode && result.bothLoved && result.bothLoved.length > 0 && (
         <div>
-          <p className="text-sm text-muted mb-2">Films you both loved:</p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
-            {result.bothLoved.slice(0, 12).map((slug) => (
+          <p className="text-sm text-muted mb-3">
+            &hearts; Films you both loved
+          </p>
+          <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-3">
+            {result.bothLoved.slice(0, 16).map((slug) => (
               <a
                 key={slug}
                 href={`https://letterboxd.com/film/${slug}/`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="truncate hover:text-accent transition-colors"
+                className="flex flex-col items-center gap-1.5 group"
               >
-                &hearts; {slug.replace(/-/g, " ")}
+                <Poster
+                  posterPath={matchPosterBySlug.get(slug)}
+                  title={slug.replace(/-/g, " ")}
+                  size={92}
+                />
               </a>
             ))}
           </div>
         </div>
       )}
 
-      {/* Taste mode: recommendations — what they love that you haven't watched. */}
+      {/* Taste mode: recommendations — films they love that you haven't seen. */}
       {isTasteMode &&
         result.theyLovedYouHavent &&
         result.theyLovedYouHavent.length > 0 && (
           <div>
-            <p className="text-sm text-muted mb-2">
-              They loved — you haven&apos;t seen it yet:
+            <p className="text-sm text-muted mb-3">
+              &rarr; They loved, you haven&apos;t seen
             </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
-              {result.theyLovedYouHavent.slice(0, 10).map((slug) => (
+            <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-3">
+              {result.theyLovedYouHavent.slice(0, 12).map((slug) => (
                 <a
                   key={slug}
                   href={`https://letterboxd.com/film/${slug}/`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="truncate hover:text-accent transition-colors"
+                  className="flex flex-col items-center gap-1.5 group"
                 >
-                  &rarr; {slug.replace(/-/g, " ")}
+                  <Poster
+                    posterPath={matchPosterBySlug.get(slug)}
+                    title={slug.replace(/-/g, " ")}
+                    size={92}
+                  />
                 </a>
               ))}
             </div>

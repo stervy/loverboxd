@@ -15,6 +15,74 @@ interface FilmDetail {
   actors: string[];
   runtime?: number;
   countries?: string[];
+  // TMDB enrichment — present when the Letterboxd page linked to TMDB and
+  // the TMDB API returned usable metadata. All optional; UI degrades to text.
+  tmdbId?: number;
+  tmdbType?: "movie" | "tv";
+  posterPath?: string;
+  backdropPath?: string;
+  overview?: string;
+  tagline?: string;
+}
+
+/**
+ * Minimal subset of the TMDB /movie/{id} or /tv/{id} response. We only store
+ * what we actually render so the cache stays small.
+ */
+interface TMDBMeta {
+  posterPath?: string;
+  backdropPath?: string;
+  overview?: string;
+  tagline?: string;
+}
+
+/**
+ * Fetch poster/backdrop metadata from TMDB for a single film. Bearer token
+ * lives in env so it never reaches the client. Cached for 30 days under the
+ * TMDB id (not the Letterboxd slug) so multiple users who rated the same film
+ * share the cache hit. Returns null on any error — UI falls back to text.
+ */
+async function fetchTMDBMeta(
+  tmdbId: number,
+  tmdbType: "movie" | "tv"
+): Promise<TMDBMeta | null> {
+  const token = process.env.TMDB_READ_TOKEN;
+  if (!token) return null;
+
+  const cacheKey = `tmdb:${tmdbType}:${tmdbId}`;
+  const cached = getCached<TMDBMeta>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const resp = await fetch(
+      `https://api.themoviedb.org/3/${tmdbType}/${tmdbId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      }
+    );
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as {
+      poster_path?: string | null;
+      backdrop_path?: string | null;
+      overview?: string;
+      tagline?: string;
+    };
+    const meta: TMDBMeta = {
+      posterPath: json.poster_path ?? undefined,
+      backdropPath: json.backdrop_path ?? undefined,
+      overview: json.overview || undefined,
+      tagline: json.tagline || undefined,
+    };
+    // "film-details" TTL is 24h; TMDB data rarely changes but we piggyback
+    // on the existing tier rather than introducing a separate one.
+    setCache(cacheKey, meta, "film-details");
+    return meta;
+  } catch {
+    return null;
+  }
 }
 
 function parseFilmPage(html: string, slug: string): FilmDetail {
@@ -70,7 +138,17 @@ function parseFilmPage(html: string, slug: string): FilmDetail {
     if (name && !countries.includes(name)) countries.push(name);
   }
 
-  return { slug, directors, genres, actors, runtime, countries };
+  // TMDB id — Letterboxd embeds an outbound link to themoviedb.org in the
+  // footer of every film page. We match either /movie/ID or /tv/ID.
+  let tmdbId: number | undefined;
+  let tmdbType: "movie" | "tv" | undefined;
+  const tmdbMatch = html.match(/themoviedb\.org\/(movie|tv)\/(\d+)/);
+  if (tmdbMatch) {
+    tmdbType = tmdbMatch[1] as "movie" | "tv";
+    tmdbId = parseInt(tmdbMatch[2], 10);
+  }
+
+  return { slug, directors, genres, actors, runtime, countries, tmdbId, tmdbType };
 }
 
 export async function POST(request: NextRequest) {
@@ -102,11 +180,13 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Fetch uncached film pages in parallel (max 5 concurrent)
+  // Fetch uncached film pages in parallel (max 5 concurrent). After parsing
+  // each page we ALSO call TMDB for poster/backdrop/overview in parallel —
+  // both fetches run server-side so the token never reaches the client.
   for (let i = 0; i < uncachedSlugs.length; i += 5) {
     const batch = uncachedSlugs.slice(i, i + 5);
     const settled = await Promise.allSettled(
-      batch.map(async (slug) => {
+      batch.map(async (slug): Promise<FilmDetail | null> => {
         const resp = await fetch(
           `https://letterboxd.com/film/${encodeURIComponent(slug)}/`,
           { headers: HEADERS }
@@ -114,7 +194,19 @@ export async function POST(request: NextRequest) {
         if (!resp.ok) return null;
         const html = await resp.text();
         if (html.includes("Just a moment")) return null;
-        return parseFilmPage(html, slug);
+        const detail = parseFilmPage(html, slug);
+
+        // Enrich with TMDB metadata if Letterboxd gave us an id.
+        if (detail.tmdbId && detail.tmdbType) {
+          const meta = await fetchTMDBMeta(detail.tmdbId, detail.tmdbType);
+          if (meta) {
+            detail.posterPath = meta.posterPath;
+            detail.backdropPath = meta.backdropPath;
+            detail.overview = meta.overview;
+            detail.tagline = meta.tagline;
+          }
+        }
+        return detail;
       })
     );
     for (const r of settled) {

@@ -241,6 +241,116 @@ function Poster({
   );
 }
 
+/**
+ * Circular TMDB profile avatar for a person (director/actor). Falls back to
+ * the person's initials on a neutral slate when TMDB has no profile photo
+ * or the lookup hasn't resolved yet.
+ */
+function Avatar({
+  profilePath,
+  name,
+  size = 40,
+}: {
+  profilePath?: string;
+  name: string;
+  size?: number;
+}) {
+  const url = profilePath
+    ? `https://image.tmdb.org/t/p/w185${profilePath}`
+    : null;
+  const initials = name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+
+  if (url) {
+    return (
+      <Image
+        src={url}
+        alt={name}
+        width={size}
+        height={size}
+        className="rounded-full object-cover bg-card-border"
+        style={{ width: size, height: size }}
+        unoptimized
+      />
+    );
+  }
+  return (
+    <div
+      className="rounded-full bg-card-border text-muted flex items-center justify-center font-semibold shrink-0"
+      style={{ width: size, height: size, fontSize: size * 0.35 }}
+      title={name}
+    >
+      {initials}
+    </div>
+  );
+}
+
+/**
+ * Resolve a set of person names (directors / actors) to TMDB profiles via
+ * /api/person-lookup. Returns a Map so the calling component can render
+ * avatars by name. Names are deduplicated and the lookup is skipped when
+ * the list is empty. Results update as soon as the single batched request
+ * returns — no progressive updates since the whole batch is small (< 30).
+ */
+interface PersonInfo {
+  profilePath?: string;
+  tmdbId: number;
+}
+
+function usePersonLookup(
+  names: string[],
+  role?: "director" | "actor"
+): Map<string, PersonInfo> {
+  const [map, setMap] = useState<Map<string, PersonInfo>>(new Map());
+
+  // Stable key that changes only when the set of names changes. Using a
+  // joined string lets us pass a raw string into the dep array instead of
+  // an array reference that'd re-trigger every render.
+  const key = useMemo(() => {
+    return [...new Set(names.filter(Boolean))].sort().join("|");
+  }, [names]);
+
+  useEffect(() => {
+    const uniqueNames = key.split("|").filter(Boolean);
+    if (uniqueNames.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch("/api/person-lookup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ names: uniqueNames, role }),
+        });
+        if (!resp.ok || cancelled) return;
+        const json = (await resp.json()) as {
+          people?: Record<
+            string,
+            { profilePath?: string; tmdbId: number }
+          >;
+        };
+        if (cancelled) return;
+        const next = new Map<string, PersonInfo>();
+        for (const [name, hit] of Object.entries(json.people ?? {})) {
+          next.set(name, { profilePath: hit.profilePath, tmdbId: hit.tmdbId });
+        }
+        setMap(next);
+      } catch {
+        // Silent — avatars just stay as initials.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [key, role]);
+
+  return map;
+}
+
 /* ---------- CSV → StatsData merge ---------- */
 
 function mergeCSVIntoStats(
@@ -855,6 +965,28 @@ function StatsView({
     };
   }, [hasRatings, csvFilms, filmDetails]);
 
+  // Collect every person name that appears in the three avatar-enabled cards
+  // (Power Duos, 5-Star Club, Liked Films Club) and look them all up in a
+  // single request. Bounded to at most ~18 unique names — cheap and cached.
+  const peopleToLookup = useMemo(() => {
+    const names = new Set<string>();
+    for (const d of powerDuos) {
+      names.add(d.director);
+      names.add(d.actor);
+    }
+    if (fiveStarClub) {
+      for (const [n] of fiveStarClub.topDirectors) names.add(n);
+      for (const [n] of fiveStarClub.topActors) names.add(n);
+    }
+    if (likedFilmsClub) {
+      for (const [n] of likedFilmsClub.topDirectors) names.add(n);
+      for (const [n] of likedFilmsClub.topActors) names.add(n);
+    }
+    return [...names];
+  }, [powerDuos, fiveStarClub, likedFilmsClub]);
+
+  const peopleMap = usePersonLookup(peopleToLookup);
+
   /* ---------- render ---------- */
   return (
     <div className="space-y-8">
@@ -1289,17 +1421,37 @@ function StatsView({
               </div>
             )}
 
-            {/* Director-Actor Power Duos */}
+            {/* Director-Actor Power Duos — with TMDB headshots that fade in
+                 as the person lookup resolves. Falls back to initials when
+                 TMDB has no profile photo. */}
             {powerDuos.length > 0 && (
               <div className="bg-card border border-card-border rounded-xl p-6">
                 <h3 className="text-lg font-semibold mb-4">Power Duos</h3>
-                <div className="space-y-3">
+                <div className="space-y-4">
                   {powerDuos.map(({ director, actor, count }, i) => (
                     <div key={`${director}-${actor}`} className="flex items-center gap-3">
-                      <span className="text-accent font-bold text-lg">{i + 1}</span>
+                      <span className="text-accent font-bold text-lg w-4">
+                        {i + 1}
+                      </span>
+                      <div className="flex -space-x-2 shrink-0">
+                        <Avatar
+                          name={director}
+                          profilePath={peopleMap.get(director)?.profilePath}
+                          size={44}
+                        />
+                        <Avatar
+                          name={actor}
+                          profilePath={peopleMap.get(actor)?.profilePath}
+                          size={44}
+                        />
+                      </div>
                       <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate">{director} + {actor}</div>
-                        <div className="text-muted text-xs">{count} film{count !== 1 ? "s" : ""} together</div>
+                        <div className="font-medium text-sm truncate">
+                          {director} <span className="text-muted">+</span> {actor}
+                        </div>
+                        <div className="text-muted text-xs">
+                          {count} film{count !== 1 ? "s" : ""} together
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -1348,9 +1500,17 @@ function StatsView({
                 {fiveStarClub.topDirectors.length > 0 && (
                   <div className="mb-3">
                     <div className="text-xs text-muted uppercase tracking-wide mb-1">Directors</div>
-                    <div className="flex flex-wrap gap-1.5">
+                    <div className="flex flex-wrap gap-2">
                       {fiveStarClub.topDirectors.map(([name, count]) => (
-                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                        <span
+                          key={name}
+                          className="bg-accent/15 text-accent text-xs pl-0.5 pr-2.5 py-0.5 rounded-full flex items-center gap-1.5"
+                        >
+                          <Avatar
+                            name={name}
+                            profilePath={peopleMap.get(name)?.profilePath}
+                            size={22}
+                          />
                           {name} ({count})
                         </span>
                       ))}
@@ -1360,9 +1520,17 @@ function StatsView({
                 {fiveStarClub.topActors.length > 0 && (
                   <div>
                     <div className="text-xs text-muted uppercase tracking-wide mb-1">Actors</div>
-                    <div className="flex flex-wrap gap-1.5">
+                    <div className="flex flex-wrap gap-2">
                       {fiveStarClub.topActors.map(([name, count]) => (
-                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                        <span
+                          key={name}
+                          className="bg-accent/15 text-accent text-xs pl-0.5 pr-2.5 py-0.5 rounded-full flex items-center gap-1.5"
+                        >
+                          <Avatar
+                            name={name}
+                            profilePath={peopleMap.get(name)?.profilePath}
+                            size={22}
+                          />
                           {name} ({count})
                         </span>
                       ))}
@@ -1396,9 +1564,17 @@ function StatsView({
                 {likedFilmsClub.topDirectors.length > 0 && (
                   <div className="mb-3">
                     <div className="text-xs text-muted uppercase tracking-wide mb-1">Directors</div>
-                    <div className="flex flex-wrap gap-1.5">
+                    <div className="flex flex-wrap gap-2">
                       {likedFilmsClub.topDirectors.map(([name, count]) => (
-                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                        <span
+                          key={name}
+                          className="bg-accent/15 text-accent text-xs pl-0.5 pr-2.5 py-0.5 rounded-full flex items-center gap-1.5"
+                        >
+                          <Avatar
+                            name={name}
+                            profilePath={peopleMap.get(name)?.profilePath}
+                            size={22}
+                          />
                           {name} ({count})
                         </span>
                       ))}
@@ -1408,9 +1584,17 @@ function StatsView({
                 {likedFilmsClub.topActors.length > 0 && (
                   <div>
                     <div className="text-xs text-muted uppercase tracking-wide mb-1">Actors</div>
-                    <div className="flex flex-wrap gap-1.5">
+                    <div className="flex flex-wrap gap-2">
                       {likedFilmsClub.topActors.map(([name, count]) => (
-                        <span key={name} className="bg-accent/15 text-accent text-xs px-2 py-0.5 rounded-full">
+                        <span
+                          key={name}
+                          className="bg-accent/15 text-accent text-xs pl-0.5 pr-2.5 py-0.5 rounded-full flex items-center gap-1.5"
+                        >
+                          <Avatar
+                            name={name}
+                            profilePath={peopleMap.get(name)?.profilePath}
+                            size={22}
+                          />
                           {name} ({count})
                         </span>
                       ))}

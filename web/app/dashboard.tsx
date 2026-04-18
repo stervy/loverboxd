@@ -145,18 +145,202 @@ function LeaderboardItem({
   rank,
   name,
   count,
+  href,
 }: {
   rank: number;
   name: string;
   count: number;
+  href?: string;
 }) {
+  const nameEl = href ? (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex-1 hover:text-accent hover:underline truncate"
+    >
+      {name}
+    </a>
+  ) : (
+    <span className="flex-1">{name}</span>
+  );
   return (
     <div className="flex items-center gap-3 py-1.5 text-sm">
       <span className="text-muted w-5 text-right">{rank}</span>
-      <span className="flex-1">{name}</span>
+      {nameEl}
       <span className="text-muted text-xs">
         {count} film{count !== 1 ? "s" : ""}
       </span>
+    </div>
+  );
+}
+
+/**
+ * Slugify a person's name into Letterboxd's URL format. Matches the
+ * conventions visible on letterboxd.com/actor/* and /director/*:
+ * lowercase, ASCII-folded, non-alphanumerics collapsed to dashes.
+ */
+function letterboxdPersonUrl(
+  role: "actor" | "director",
+  name: string
+): string {
+  const slug = name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/['\u2018\u2019]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `https://letterboxd.com/${role}/${slug}/`;
+}
+
+/**
+ * Simple SVG pie chart + legend. Starts at the top and fills clockwise.
+ * Handles the single-slice (full circle) edge case so Math.sin/cos don't
+ * collapse to a zero-area path.
+ */
+function PieChart({
+  data,
+  size = 160,
+}: {
+  data: [string, number][];
+  size?: number;
+}) {
+  const total = data.reduce((s, [, c]) => s + c, 0);
+  if (total === 0 || data.length === 0) return null;
+
+  // Distinct, legible palette that reads on both light and dark backgrounds.
+  const palette = [
+    "#f87171",
+    "#fb923c",
+    "#fbbf24",
+    "#a3e635",
+    "#34d399",
+    "#22d3ee",
+    "#60a5fa",
+    "#a78bfa",
+    "#f472b6",
+    "#94a3b8",
+  ];
+
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2;
+
+  // Prefix-sum fractions so we can compute each slice's start angle without
+  // mutating shared state during render (React 19 flags that as unsafe).
+  const fractions = data.map(([, c]) => c / total);
+  const starts: number[] = [];
+  fractions.reduce((acc, f) => {
+    starts.push(acc);
+    return acc + f;
+  }, 0);
+
+  const slices = data.map(([name, count], i) => {
+    const frac = fractions[i];
+    const a0 = -Math.PI / 2 + starts[i] * Math.PI * 2;
+    const a1 = a0 + frac * Math.PI * 2;
+    const large = frac > 0.5 ? 1 : 0;
+    const x0 = cx + r * Math.cos(a0);
+    const y0 = cy + r * Math.sin(a0);
+    const x1 = cx + r * Math.cos(a1);
+    const y1 = cy + r * Math.sin(a1);
+    const d =
+      data.length === 1
+        ? `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`
+        : `M ${cx} ${cy} L ${x0.toFixed(3)} ${y0.toFixed(3)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(3)} ${y1.toFixed(3)} Z`;
+    return { d, color: palette[i % palette.length], name, count, pct: frac };
+  });
+
+  return (
+    <div className="flex items-center gap-4">
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        className="shrink-0"
+      >
+        {slices.map((s) => (
+          <path key={s.name} d={s.d} fill={s.color} />
+        ))}
+      </svg>
+      <ul className="flex-1 min-w-0 space-y-1 text-xs">
+        {slices.map((s) => (
+          <li key={s.name} className="flex items-center gap-2">
+            <span
+              className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
+              style={{ backgroundColor: s.color }}
+            />
+            <span className="flex-1 truncate" title={s.name}>
+              {s.name}
+            </span>
+            <span className="text-muted tabular-nums">
+              {Math.round(s.pct * 100)}%
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Person leaderboard with headshots for the top 3 and a compact ranked list
+ * for the rest. Falls back to initials via Avatar when TMDB has no photo or
+ * the lookup hasn't resolved yet.
+ */
+function PersonLeaderboard({
+  items,
+  peopleMap,
+  role,
+}: {
+  items: [string, number][];
+  peopleMap: Map<string, PersonInfo>;
+  role: "actor" | "director";
+}) {
+  const top3 = items.slice(0, 3);
+  const rest = items.slice(3);
+  return (
+    <div>
+      {top3.length > 0 && (
+        <div className="flex items-start justify-around gap-2 mb-3">
+          {top3.map(([name, count]) => (
+            <a
+              key={name}
+              href={letterboxdPersonUrl(role, name)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex flex-col items-center gap-1.5 text-center min-w-0 flex-1 group hover:opacity-90 transition-opacity"
+              title={`View ${name} on Letterboxd`}
+            >
+              <Avatar
+                profilePath={peopleMap.get(name)?.profilePath}
+                name={name}
+                size={64}
+              />
+              <div className="text-xs font-medium truncate w-full group-hover:text-accent group-hover:underline">
+                {name}
+              </div>
+              <div className="text-muted text-[11px]">
+                {count} film{count !== 1 ? "s" : ""}
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div>
+          {rest.map(([name, count], i) => (
+            <LeaderboardItem
+              key={name}
+              rank={i + 4}
+              name={name}
+              count={count}
+              href={letterboxdPersonUrl(role, name)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -782,6 +966,66 @@ function StatsView({
       .sort((a, b) => b.avg - a.avg);
   }, [filmDetails, ratingBySlug]);
 
+  // Highest-rated directors & actors — Bayesian-shrunk avg rating per person.
+  //
+  // Raw avg rating heavily favors one-hit wonders (one 5★ film = perfect
+  // score). We shrink each person's avg toward the user's global mean using
+  // (sum + m * globalMean) / (count + m). With m = 3, someone with a single
+  // 5★ film only ranks as well as a person with 3+ films averaging slightly
+  // above the user's baseline. People with more films at a high avg float to
+  // the top — which is the genuinely interesting signal.
+  //
+  // Also require count >= 2 as a floor so single-film entries don't appear
+  // at all. Displayed avg is the raw avg (intuitive); the Bayesian value is
+  // only used for ranking.
+  const highestRatedPeople = useMemo(() => {
+    if (ratingBySlug.size === 0) return null;
+    let globalSum = 0;
+    for (const r of ratingBySlug.values()) globalSum += r;
+    const globalMean = globalSum / ratingBySlug.size;
+    const M_DIRECTOR = 3;
+    const M_ACTOR = 3;
+
+    const dirStats = new Map<string, { sum: number; count: number }>();
+    const actStats = new Map<string, { sum: number; count: number }>();
+    for (const film of filmDetails) {
+      const rating = ratingBySlug.get(film.slug);
+      if (rating == null) continue;
+      for (const d of film.directors) {
+        const e = dirStats.get(d) ?? { sum: 0, count: 0 };
+        e.sum += rating;
+        e.count += 1;
+        dirStats.set(d, e);
+      }
+      for (const a of film.actors) {
+        const e = actStats.get(a) ?? { sum: 0, count: 0 };
+        e.sum += rating;
+        e.count += 1;
+        actStats.set(a, e);
+      }
+    }
+
+    const rank = (
+      stats: Map<string, { sum: number; count: number }>,
+      m: number
+    ) =>
+      [...stats.entries()]
+        .filter(([, v]) => v.count >= 2)
+        .map(([name, v]) => ({
+          name,
+          avg: v.sum / v.count,
+          count: v.count,
+          score: (v.sum + m * globalMean) / (v.count + m),
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+
+    const directors = rank(dirStats, M_DIRECTOR);
+    const actors = rank(actStats, M_ACTOR);
+    if (directors.length === 0 && actors.length === 0) return null;
+    return { directors, actors, globalMean };
+  }, [filmDetails, ratingBySlug]);
+
   // 4. Five-Star Club — common traits of top-rated films
   const fiveStarClub = useMemo(() => {
     const threshold = ratingBySlug.size > 0 ? 5 : 0;
@@ -995,6 +1239,12 @@ function StatsView({
       names.add(d.director);
       names.add(d.actor);
     }
+    for (const [n] of topDirectors) names.add(n);
+    for (const [n] of topActors) names.add(n);
+    if (highestRatedPeople) {
+      for (const p of highestRatedPeople.directors) names.add(p.name);
+      for (const p of highestRatedPeople.actors) names.add(p.name);
+    }
     if (fiveStarClub) {
       for (const [n] of fiveStarClub.topDirectors) names.add(n);
       for (const [n] of fiveStarClub.topActors) names.add(n);
@@ -1004,7 +1254,7 @@ function StatsView({
       for (const [n] of likedFilmsClub.topActors) names.add(n);
     }
     return [...names];
-  }, [powerDuos, fiveStarClub, likedFilmsClub]);
+  }, [powerDuos, topDirectors, topActors, highestRatedPeople, fiveStarClub, likedFilmsClub]);
 
   const peopleMap = usePersonLookup(peopleToLookup);
 
@@ -1330,16 +1580,11 @@ function StatsView({
               Most Watched Directors
             </h3>
             {topDirectors.length > 0 ? (
-              <div>
-                {topDirectors.map(([name, count], i) => (
-                  <LeaderboardItem
-                    key={name}
-                    rank={i + 1}
-                    name={name}
-                    count={count}
-                  />
-                ))}
-              </div>
+              <PersonLeaderboard
+                items={topDirectors}
+                peopleMap={peopleMap}
+                role="director"
+              />
             ) : (
               <EnrichingPlaceholder />
             )}
@@ -1350,16 +1595,7 @@ function StatsView({
               Most Watched Genres
             </h3>
             {topGenres.length > 0 ? (
-              <div>
-                {topGenres.map(([name, count], i) => (
-                  <LeaderboardItem
-                    key={name}
-                    rank={i + 1}
-                    name={name}
-                    count={count}
-                  />
-                ))}
-              </div>
+              <PieChart data={topGenres} />
             ) : (
               <EnrichingPlaceholder />
             )}
@@ -1370,16 +1606,11 @@ function StatsView({
               Most Watched Actors
             </h3>
             {topActors.length > 0 ? (
-              <div>
-                {topActors.map(([name, count], i) => (
-                  <LeaderboardItem
-                    key={name}
-                    rank={i + 1}
-                    name={name}
-                    count={count}
-                  />
-                ))}
-              </div>
+              <PersonLeaderboard
+                items={topActors}
+                peopleMap={peopleMap}
+                role="actor"
+              />
             ) : (
               <EnrichingPlaceholder />
             )}
@@ -1548,6 +1779,100 @@ function StatsView({
                     <div className="text-xs text-muted">{count} films</div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* Highest-Rated Directors & Actors — Bayesian-weighted so a single
+              5-star film doesn't crown an actor. Ranks by avg rating pulled
+              toward the user's global mean by m=3 imaginary films, then
+              filtered to people with 2+ rated films. */}
+          {hasRatings && highestRatedPeople && (
+            <div className="bg-card border border-card-border rounded-xl p-6">
+              <div className="flex items-baseline justify-between flex-wrap gap-2 mb-1">
+                <h3 className="text-lg font-semibold">Your Highest-Rated People</h3>
+                <span className="text-muted text-xs">
+                  Weighted avg · min 2 films
+                </span>
+              </div>
+              <p className="text-muted text-xs mb-4">
+                Your global avg is {highestRatedPeople.globalMean.toFixed(2)}★ — scores are pulled toward it for people with few films so one-hit wonders don&apos;t dominate.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                {highestRatedPeople.directors.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">
+                      Directors
+                    </h4>
+                    <div className="space-y-2.5">
+                      {highestRatedPeople.directors.map((p) => (
+                        <a
+                          key={p.name}
+                          href={letterboxdPersonUrl("director", p.name)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-3 group hover:opacity-90 transition-opacity"
+                          title={`View ${p.name} on Letterboxd`}
+                        >
+                          <Avatar
+                            profilePath={peopleMap.get(p.name)?.profilePath}
+                            name={p.name}
+                            size={44}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium truncate group-hover:text-accent group-hover:underline">
+                              {p.name}
+                            </div>
+                            <div className="text-xs text-muted">
+                              {p.count} film{p.count !== 1 ? "s" : ""}
+                            </div>
+                          </div>
+                          <div className="text-accent font-bold tabular-nums">
+                            {p.avg.toFixed(1)}
+                            <span className="text-xs text-muted">/5</span>
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {highestRatedPeople.actors.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">
+                      Actors
+                    </h4>
+                    <div className="space-y-2.5">
+                      {highestRatedPeople.actors.map((p) => (
+                        <a
+                          key={p.name}
+                          href={letterboxdPersonUrl("actor", p.name)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-3 group hover:opacity-90 transition-opacity"
+                          title={`View ${p.name} on Letterboxd`}
+                        >
+                          <Avatar
+                            profilePath={peopleMap.get(p.name)?.profilePath}
+                            name={p.name}
+                            size={44}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium truncate group-hover:text-accent group-hover:underline">
+                              {p.name}
+                            </div>
+                            <div className="text-xs text-muted">
+                              {p.count} film{p.count !== 1 ? "s" : ""}
+                            </div>
+                          </div>
+                          <div className="text-accent font-bold tabular-nums">
+                            {p.avg.toFixed(1)}
+                            <span className="text-xs text-muted">/5</span>
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1962,6 +2287,14 @@ function MatchView({ result }: { result: MatchResult }) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
 
+  // Resolve TMDB headshots for the top-3 directors/actors shown in the
+  // shared leaderboards. usePersonLookup already keys off the sorted name
+  // list, so a fresh array each render doesn't refetch unnecessarily.
+  const matchPeopleMap = usePersonLookup([
+    ...topDirectors.map(([n]) => n),
+    ...topActors.map(([n]) => n),
+  ]);
+
   // Build slug → posterPath lookup from shared-film enrichment so "Both Loved"
   // and "They Loved You Haven't Seen" render as a poster wall instead of text.
   const matchPosterBySlug = new Map<string, string>();
@@ -2080,16 +2413,11 @@ function MatchView({ result }: { result: MatchResult }) {
                 Most Watched Directors
               </h5>
               {topDirectors.length > 0 ? (
-                <div>
-                  {topDirectors.map(([name, count], i) => (
-                    <LeaderboardItem
-                      key={name}
-                      rank={i + 1}
-                      name={name}
-                      count={count}
-                    />
-                  ))}
-                </div>
+                <PersonLeaderboard
+                  items={topDirectors}
+                  peopleMap={matchPeopleMap}
+                  role="director"
+                />
               ) : (
                 <EnrichingPlaceholder />
               )}
@@ -2099,16 +2427,7 @@ function MatchView({ result }: { result: MatchResult }) {
                 Most Watched Genres
               </h5>
               {topGenres.length > 0 ? (
-                <div>
-                  {topGenres.map(([name, count], i) => (
-                    <LeaderboardItem
-                      key={name}
-                      rank={i + 1}
-                      name={name}
-                      count={count}
-                    />
-                  ))}
-                </div>
+                <PieChart data={topGenres} size={140} />
               ) : (
                 <EnrichingPlaceholder />
               )}
@@ -2118,16 +2437,11 @@ function MatchView({ result }: { result: MatchResult }) {
                 Most Watched Actors
               </h5>
               {topActors.length > 0 ? (
-                <div>
-                  {topActors.map(([name, count], i) => (
-                    <LeaderboardItem
-                      key={name}
-                      rank={i + 1}
-                      name={name}
-                      count={count}
-                    />
-                  ))}
-                </div>
+                <PersonLeaderboard
+                  items={topActors}
+                  peopleMap={matchPeopleMap}
+                  role="actor"
+                />
               ) : (
                 <EnrichingPlaceholder />
               )}

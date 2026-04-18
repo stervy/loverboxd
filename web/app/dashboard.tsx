@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Image from "next/image";
 import { type CSVFilm, extractRatingsFromFile } from "./csv-utils";
+import WorldHeatMap from "./components/WorldHeatMap";
 
 /** Build a TMDB CDN URL from a poster path. Sizes: w92, w154, w185, w342, w500, w780, original. */
 function tmdbImg(
@@ -1070,8 +1071,10 @@ function StatsView({
     };
   }, [filmDetails]);
 
-  // 6. Country Explorer
-  const countryBreakdown = useMemo(() => {
+  // 6. Country Explorer — returns full list (for heat map) and a trimmed top-10
+  // view (for the bar chart). Keeping both means the map sees every country
+  // the user has watched, even the long tail.
+  const { countryBreakdown, countryAll } = useMemo(() => {
     const counts = new Map<string, number>();
     let total = 0;
     for (const film of filmDetails) {
@@ -1080,11 +1083,15 @@ function StatsView({
         total++;
       }
     }
-    if (total === 0) return [];
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10)
-      .map(([country, count]) => ({ country, count, pct: Math.round((count / total) * 100) }));
+    if (total === 0) return { countryBreakdown: [], countryAll: [] };
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const all = sorted.map(([country, count]) => ({ country, count }));
+    const top = sorted.slice(0, 10).map(([country, count]) => ({
+      country,
+      count,
+      pct: Math.round((count / total) * 100),
+    }));
+    return { countryBreakdown: top, countryAll: all };
   }, [filmDetails]);
 
   /* ---------- match ---------- */
@@ -2037,6 +2044,22 @@ function StatsView({
           {countryBreakdown.length > 0 && (
             <div className="bg-card border border-card-border rounded-xl p-6">
               <h3 className="text-lg font-semibold mb-4">Country Explorer</h3>
+              <div className="mb-6 -mx-2">
+                <WorldHeatMap data={countryAll} />
+                <div className="flex items-center gap-2 mt-2 text-xs text-muted justify-end">
+                  <span>fewer</span>
+                  <div className="flex h-2 w-32 rounded overflow-hidden">
+                    {[0.18, 0.35, 0.55, 0.75, 1].map((a) => (
+                      <div
+                        key={a}
+                        className="flex-1"
+                        style={{ background: `rgba(0, 192, 48, ${a})` }}
+                      />
+                    ))}
+                  </div>
+                  <span>more films</span>
+                </div>
+              </div>
               <div className="space-y-2">
                 {countryBreakdown.map(({ country, count, pct }) => (
                   <div key={country} className="flex items-center gap-3">

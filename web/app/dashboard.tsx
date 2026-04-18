@@ -525,6 +525,10 @@ function StatsView({
   const [enriching, setEnriching] = useState(false);
   const [enrichProgress, setEnrichProgress] = useState(0);
 
+  // Which Power Duo row is expanded to show its film list (null = none).
+  // Keyed by "director|||actor" so it stays stable if the list reorders.
+  const [expandedDuoKey, setExpandedDuoKey] = useState<string | null>(null);
+
   // Match state
   const [showMatch, setShowMatch] = useState(false);
   const [friendName, setFriendName] = useState("");
@@ -701,6 +705,21 @@ function StatsView({
     return map;
   }, [csvFilms, stats.topRated]);
 
+  // Build slug → title lookup. Prefers CSV titles (most complete), falls back
+  // to topRated; renders fall back to a humanized slug when no title is known.
+  const titleBySlug = useMemo(() => {
+    const map = new Map<string, string>();
+    if (csvFilms) {
+      for (const f of csvFilms) {
+        if (f.slug && f.title) map.set(f.slug, f.title);
+      }
+    }
+    for (const f of stats.topRated) {
+      if (f.slug && f.title && !map.has(f.slug)) map.set(f.slug, f.title);
+    }
+    return map;
+  }, [csvFilms, stats.topRated]);
+
   // 1. Cinematic Age — rating-weighted average film year
   const cinematicAge = useMemo(() => {
     let weightedSum = 0;
@@ -723,22 +742,24 @@ function StatsView({
 
   // 2. Director-Actor Power Duos
   const powerDuos = useMemo(() => {
-    const pairCounts = new Map<string, number>();
+    const pairSlugs = new Map<string, string[]>();
     for (const film of filmDetails) {
       for (const dir of film.directors) {
         for (const act of film.actors) {
           const key = `${dir}|||${act}`;
-          pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+          const existing = pairSlugs.get(key);
+          if (existing) existing.push(film.slug);
+          else pairSlugs.set(key, [film.slug]);
         }
       }
     }
-    return [...pairCounts.entries()]
-      .filter(([, count]) => count >= 2)
-      .sort((a, b) => b[1] - a[1])
+    return [...pairSlugs.entries()]
+      .filter(([, slugs]) => slugs.length >= 2)
+      .sort((a, b) => b[1].length - a[1].length)
       .slice(0, 3)
-      .map(([key, count]) => {
+      .map(([key, slugs]) => {
         const [director, actor] = key.split("|||");
-        return { director, actor, count };
+        return { director, actor, count: slugs.length, slugs };
       });
   }, [filmDetails]);
 
@@ -1428,33 +1449,88 @@ function StatsView({
               <div className="bg-card border border-card-border rounded-xl p-6">
                 <h3 className="text-lg font-semibold mb-4">Power Duos</h3>
                 <div className="space-y-4">
-                  {powerDuos.map(({ director, actor, count }, i) => (
-                    <div key={`${director}-${actor}`} className="flex items-center gap-3">
-                      <span className="text-accent font-bold text-lg w-4">
-                        {i + 1}
-                      </span>
-                      <div className="flex -space-x-2 shrink-0">
-                        <Avatar
-                          name={director}
-                          profilePath={peopleMap.get(director)?.profilePath}
-                          size={44}
-                        />
-                        <Avatar
-                          name={actor}
-                          profilePath={peopleMap.get(actor)?.profilePath}
-                          size={44}
-                        />
+                  {powerDuos.map(({ director, actor, count, slugs }, i) => {
+                    const key = `${director}|||${actor}`;
+                    const isExpanded = expandedDuoKey === key;
+                    return (
+                      <div key={key}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedDuoKey(isExpanded ? null : key)
+                          }
+                          aria-expanded={isExpanded}
+                          className="w-full flex items-center gap-3 text-left rounded-lg -mx-2 px-2 py-1 hover:bg-background/60 transition-colors cursor-pointer"
+                        >
+                          <span className="text-accent font-bold text-lg w-4">
+                            {i + 1}
+                          </span>
+                          <div className="flex -space-x-2 shrink-0">
+                            <Avatar
+                              name={director}
+                              profilePath={peopleMap.get(director)?.profilePath}
+                              size={44}
+                            />
+                            <Avatar
+                              name={actor}
+                              profilePath={peopleMap.get(actor)?.profilePath}
+                              size={44}
+                            />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-sm truncate">
+                              {director} <span className="text-muted">+</span> {actor}
+                            </div>
+                            <div className="text-muted text-xs">
+                              {count} film{count !== 1 ? "s" : ""} together
+                            </div>
+                          </div>
+                          <span
+                            className={`text-muted text-xs shrink-0 transition-transform ${
+                              isExpanded ? "rotate-180" : ""
+                            }`}
+                            aria-hidden
+                          >
+                            ▾
+                          </span>
+                        </button>
+                        {isExpanded && (
+                          <div className="mt-3 ml-7 pl-3 border-l border-card-border flex flex-wrap gap-3">
+                            {slugs.map((slug) => {
+                              const title =
+                                titleBySlug.get(slug) ?? slug.replace(/-/g, " ");
+                              const year = yearBySlug.get(slug);
+                              return (
+                                <a
+                                  key={slug}
+                                  href={`https://letterboxd.com/film/${slug}/`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="flex flex-col items-center gap-1 w-[68px] group"
+                                >
+                                  <Poster
+                                    posterPath={posterBySlug.get(slug)}
+                                    title={title}
+                                    size={68}
+                                  />
+                                  <div className="text-center w-full">
+                                    <div className="text-[11px] font-medium leading-tight line-clamp-2 group-hover:text-accent transition-colors">
+                                      {title}
+                                    </div>
+                                    {year && (
+                                      <div className="text-[10px] text-muted">
+                                        {year}
+                                      </div>
+                                    )}
+                                  </div>
+                                </a>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-sm truncate">
-                          {director} <span className="text-muted">+</span> {actor}
-                        </div>
-                        <div className="text-muted text-xs">
-                          {count} film{count !== 1 ? "s" : ""} together
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}

@@ -62,6 +62,12 @@ interface FilmDetail {
   actors: string[];
   runtime?: number;
   countries?: string[];
+  // Letterboxd-scraped fields used by the analytics sections. All optional
+  // because older/obscure films may not have every value populated.
+  themes?: string[];
+  avgRating?: number;
+  watchedCount?: number;
+  likesCount?: number;
   // TMDB enrichment — all optional, UI falls back to text if absent.
   tmdbId?: number;
   tmdbType?: "movie" | "tv";
@@ -280,6 +286,217 @@ function PieChart({
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * Vertical bar chart with optional stacking (a "liked" subset of the total)
+ * and an optional overlay line plotting a secondary value per bar. Hand-rolled
+ * SVG to stay consistent with PieChart and avoid pulling in a charting lib.
+ *
+ * Data shape: each entry has a label (x-axis), total (primary bar height),
+ * optional liked (stacked segment, drawn on top of total), and optional
+ * overlay (secondary value plotted as a polyline — e.g. avg rating per theme).
+ */
+function BarChart({
+  data,
+  height = 200,
+  overlayLabel,
+  overlayRange,
+  rotateLabels = false,
+}: {
+  data: { label: string; total: number; liked?: number; overlay?: number }[];
+  height?: number;
+  overlayLabel?: string;
+  overlayRange?: [number, number];
+  rotateLabels?: boolean;
+}) {
+  if (data.length === 0) return null;
+
+  // Layout: SVG width is responsive via viewBox. We fix an arbitrary coordinate
+  // width so bar widths stay visually balanced regardless of screen size.
+  const barCount = data.length;
+  const barWidth = 34;
+  const gap = 10;
+  const leftPad = 36;
+  const rightPad = 36;
+  const topPad = 16;
+  const bottomPad = rotateLabels ? 70 : 34;
+  const plotHeight = height - topPad - bottomPad;
+  const width = leftPad + rightPad + barCount * (barWidth + gap) - gap;
+
+  const maxTotal = Math.max(...data.map((d) => d.total), 1);
+  const yBar = (v: number) => topPad + plotHeight * (1 - v / maxTotal);
+
+  const hasOverlay = data.some((d) => d.overlay != null);
+  const [ovLo, ovHi] = overlayRange ?? [
+    Math.min(...data.map((d) => d.overlay ?? Infinity).filter((v) => Number.isFinite(v))),
+    Math.max(...data.map((d) => d.overlay ?? -Infinity).filter((v) => Number.isFinite(v))),
+  ];
+  const ovSpan = Math.max(ovHi - ovLo, 0.0001);
+  const yOverlay = (v: number) =>
+    topPad + plotHeight * (1 - (v - ovLo) / ovSpan);
+
+  const overlayPoints = hasOverlay
+    ? data
+        .map((d, i) => {
+          if (d.overlay == null) return null;
+          const x = leftPad + i * (barWidth + gap) + barWidth / 2;
+          return `${x.toFixed(1)},${yOverlay(d.overlay).toFixed(1)}`;
+        })
+        .filter((p): p is string => p != null)
+        .join(" ")
+    : "";
+
+  // Reference gridlines at 0/25/50/75/100% of the max total.
+  const gridYs = [0, 0.25, 0.5, 0.75, 1].map((f) => ({
+    y: topPad + plotHeight * (1 - f),
+    v: Math.round(maxTotal * f),
+  }));
+
+  return (
+    <div className="w-full">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        width="100%"
+        preserveAspectRatio="xMidYMid meet"
+        className="overflow-visible"
+      >
+        {/* gridlines */}
+        {gridYs.map(({ y, v }) => (
+          <g key={y}>
+            <line
+              x1={leftPad}
+              x2={width - rightPad}
+              y1={y}
+              y2={y}
+              stroke="currentColor"
+              className="text-card-border"
+              strokeWidth={0.5}
+            />
+            <text
+              x={leftPad - 6}
+              y={y + 3}
+              textAnchor="end"
+              className="fill-muted text-[9px] tabular-nums"
+            >
+              {v}
+            </text>
+          </g>
+        ))}
+
+        {data.map((d, i) => {
+          const x = leftPad + i * (barWidth + gap);
+          const notLiked = Math.max(d.total - (d.liked ?? 0), 0);
+          const yNotLiked = yBar(notLiked);
+          const yLiked = yBar(d.total);
+          return (
+            <g key={`${d.label}-${i}`}>
+              {/* Base (not-liked) portion of the bar — green. */}
+              <rect
+                x={x}
+                y={yNotLiked}
+                width={barWidth}
+                height={Math.max(plotHeight - (yNotLiked - topPad), 0)}
+                fill="#34d399"
+                opacity={0.85}
+              />
+              {/* Liked subset stacked on top — orange. */}
+              {d.liked != null && d.liked > 0 && (
+                <rect
+                  x={x}
+                  y={yLiked}
+                  width={barWidth}
+                  height={Math.max(yNotLiked - yLiked, 0)}
+                  fill="#fb923c"
+                />
+              )}
+              {/* Bar total label above the bar for legibility. */}
+              <text
+                x={x + barWidth / 2}
+                y={yLiked - 4}
+                textAnchor="middle"
+                className="fill-muted text-[9px] tabular-nums"
+              >
+                {d.total}
+              </text>
+              {/* X-axis label — optionally rotated for long theme names. */}
+              <text
+                x={x + barWidth / 2}
+                y={height - bottomPad + 12}
+                textAnchor={rotateLabels ? "end" : "middle"}
+                transform={
+                  rotateLabels
+                    ? `rotate(-55 ${x + barWidth / 2} ${height - bottomPad + 12})`
+                    : undefined
+                }
+                className="fill-muted text-[10px]"
+              >
+                <title>{d.label}</title>
+                {d.label.length > 18 ? `${d.label.slice(0, 17)}…` : d.label}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Overlay polyline (e.g. avg rating per theme). */}
+        {hasOverlay && overlayPoints && (
+          <>
+            <polyline
+              points={overlayPoints}
+              fill="none"
+              stroke="#60a5fa"
+              strokeWidth={1.5}
+            />
+            {data.map((d, i) => {
+              if (d.overlay == null) return null;
+              const cx = leftPad + i * (barWidth + gap) + barWidth / 2;
+              return (
+                <circle
+                  key={`ov-${i}`}
+                  cx={cx}
+                  cy={yOverlay(d.overlay)}
+                  r={2.2}
+                  fill="#60a5fa"
+                />
+              );
+            })}
+            {/* Right-side overlay axis — bottom / middle / top tick labels. */}
+            {[ovLo, (ovLo + ovHi) / 2, ovHi].map((v, i) => (
+              <text
+                key={`ovtxt-${i}`}
+                x={width - rightPad + 4}
+                y={yOverlay(v) + 3}
+                textAnchor="start"
+                className="fill-[#60a5fa] text-[9px] tabular-nums"
+              >
+                {v.toFixed(1)}
+              </text>
+            ))}
+          </>
+        )}
+      </svg>
+
+      {/* Legend. */}
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] text-muted mt-2">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-[#34d399]" />
+          watched
+        </span>
+        {data.some((d) => (d.liked ?? 0) > 0) && (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-[#fb923c]" />
+            liked
+          </span>
+        )}
+        {hasOverlay && overlayLabel && (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-[2px] bg-[#60a5fa]" />
+            {overlayLabel}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -1087,6 +1304,268 @@ function StatsView({
       .map(([country, count]) => ({ country, count, pct: Math.round((count / total) * 100) }));
   }, [filmDetails]);
 
+  // Liked-slug set — which films the user hearted. Only available when they
+  // uploaded the ZIP (likes/films.csv). Used to stack the orange "liked"
+  // segment on the new bar charts. Empty for RSS-only users.
+  const likedSlugSet = useMemo(() => {
+    const s = new Set<string>();
+    if (csvFilms) {
+      for (const f of csvFilms) if (f.liked && f.slug) s.add(f.slug);
+    }
+    return s;
+  }, [csvFilms]);
+
+  // 7. Top Genre Combinations — pairs of genres that co-occur on the same film.
+  // For each film with ≥2 genres we emit every alphabetically-sorted pair so
+  // "Drama + Romance" and "Romance + Drama" collapse to one key.
+  const topGenreCombinations = useMemo(() => {
+    const counts = new Map<string, { total: number; liked: number }>();
+    for (const film of filmDetails) {
+      if (!film.genres || film.genres.length < 2) continue;
+      const sorted = [...film.genres].sort();
+      const isLiked = likedSlugSet.has(film.slug) ? 1 : 0;
+      for (let i = 0; i < sorted.length; i++) {
+        for (let j = i + 1; j < sorted.length; j++) {
+          const key = `${sorted[i]} + ${sorted[j]}`;
+          const entry = counts.get(key) ?? { total: 0, liked: 0 };
+          entry.total += 1;
+          entry.liked += isLiked;
+          counts.set(key, entry);
+        }
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1].total - a[1].total)
+      .slice(0, 10)
+      .map(([label, { total, liked }]) => ({ label, total, liked }));
+  }, [filmDetails, likedSlugSet]);
+
+  // 8. Top Themes — Letterboxd theme/nanogenre tags, with the user's avg
+  // rating in each theme overlaid as a line. avgUserRating is only meaningful
+  // when the user rates films, so we compute it conditionally.
+  const topThemes = useMemo(() => {
+    const stats = new Map<
+      string,
+      { total: number; liked: number; ratingSum: number; ratingCount: number }
+    >();
+    for (const film of filmDetails) {
+      if (!film.themes || film.themes.length === 0) continue;
+      const isLiked = likedSlugSet.has(film.slug) ? 1 : 0;
+      const userRating = ratingBySlug.get(film.slug);
+      for (const t of film.themes) {
+        const entry =
+          stats.get(t) ?? { total: 0, liked: 0, ratingSum: 0, ratingCount: 0 };
+        entry.total += 1;
+        entry.liked += isLiked;
+        if (userRating != null) {
+          entry.ratingSum += userRating;
+          entry.ratingCount += 1;
+        }
+        stats.set(t, entry);
+      }
+    }
+    const sorted = [...stats.entries()]
+      .sort((a, b) => b[1].total - a[1].total)
+      .slice(0, 20);
+    if (sorted.length === 0) return [];
+    return sorted.map(([label, s]) => ({
+      label,
+      total: s.total,
+      liked: s.liked,
+      avgUserRating: s.ratingCount > 0 ? s.ratingSum / s.ratingCount : undefined,
+    }));
+  }, [filmDetails, likedSlugSet, ratingBySlug]);
+
+  // 9. Popularity & Likeability buckets — how obscure / likeable are this
+  // user's films on average, compared to the Letterboxd universe. Popularity
+  // is measured by watchedCount; likeability by likesCount / watchedCount.
+  // Thresholds match the reference screenshots so bucket labels stay familiar.
+  const popularityBuckets = useMemo(() => {
+    const buckets: { label: string; total: number; liked: number }[] = [
+      { label: "very obscure", total: 0, liked: 0 },
+      { label: "obscure", total: 0, liked: 0 },
+      { label: "popular", total: 0, liked: 0 },
+      { label: "very popular", total: 0, liked: 0 },
+    ];
+    let filmsWithData = 0;
+    for (const film of filmDetails) {
+      if (film.watchedCount == null) continue;
+      filmsWithData += 1;
+      const idx =
+        film.watchedCount <= 10_000
+          ? 0
+          : film.watchedCount <= 100_000
+            ? 1
+            : film.watchedCount <= 1_000_000
+              ? 2
+              : 3;
+      buckets[idx].total += 1;
+      if (likedSlugSet.has(film.slug)) buckets[idx].liked += 1;
+    }
+    return filmsWithData === 0 ? null : buckets;
+  }, [filmDetails, likedSlugSet]);
+
+  const likeabilityBuckets = useMemo(() => {
+    const buckets: { label: string; total: number; liked: number }[] = [
+      { label: "rarely likeable", total: 0, liked: 0 },
+      { label: "sometimes likeable", total: 0, liked: 0 },
+      { label: "often likeable", total: 0, liked: 0 },
+      { label: "usually likeable", total: 0, liked: 0 },
+    ];
+    let filmsWithData = 0;
+    for (const film of filmDetails) {
+      if (
+        film.likesCount == null ||
+        film.watchedCount == null ||
+        film.watchedCount === 0
+      ) {
+        continue;
+      }
+      filmsWithData += 1;
+      const ratio = film.likesCount / film.watchedCount;
+      const idx =
+        ratio <= 0.1 ? 0 : ratio <= 0.2 ? 1 : ratio <= 0.4 ? 2 : 3;
+      buckets[idx].total += 1;
+      if (likedSlugSet.has(film.slug)) buckets[idx].liked += 1;
+    }
+    return filmsWithData === 0 ? null : buckets;
+  }, [filmDetails, likedSlugSet]);
+
+  // Extremes (most obscure / most popular / most likeable / least likeable)
+  // used for the prose callouts under the popularity & likeability charts.
+  const popularityExtremes = useMemo(() => {
+    let mostObscure: FilmDetail | null = null;
+    let mostPopular: FilmDetail | null = null;
+    let mostLikeable: { film: FilmDetail; ratio: number } | null = null;
+    let leastLikeable: { film: FilmDetail; ratio: number } | null = null;
+    for (const film of filmDetails) {
+      if (film.watchedCount != null) {
+        if (mostObscure == null || film.watchedCount < mostObscure.watchedCount!) {
+          mostObscure = film;
+        }
+        if (mostPopular == null || film.watchedCount > mostPopular.watchedCount!) {
+          mostPopular = film;
+        }
+        if (film.likesCount != null && film.watchedCount > 0) {
+          const ratio = film.likesCount / film.watchedCount;
+          if (mostLikeable == null || ratio > mostLikeable.ratio) {
+            mostLikeable = { film, ratio };
+          }
+          if (leastLikeable == null || ratio < leastLikeable.ratio) {
+            leastLikeable = { film, ratio };
+          }
+        }
+      }
+    }
+    return { mostObscure, mostPopular, mostLikeable, leastLikeable };
+  }, [filmDetails]);
+
+  // 10. Rating comparison — side-by-side histograms of the user's ratings vs
+  // the Letterboxd weighted averages for the same films, plus the headline
+  // delta + biggest disagreements for the prose copy. Gated on the user
+  // having rated at least one film (proxy for hasRatings, since hasRatings
+  // is declared later in the component body).
+  const ratingComparison = useMemo(() => {
+    if (ratingBySlug.size === 0) return null;
+
+    // User rating histogram in half-star bins (0.5 → 5.0).
+    const userBins: { label: string; total: number; liked: number }[] = [];
+    for (let r = 0.5; r <= 5.0001; r += 0.5) {
+      userBins.push({ label: r.toFixed(1), total: 0, liked: 0 });
+    }
+    for (const [slug, rating] of ratingBySlug) {
+      const idx = Math.round(rating / 0.5) - 1;
+      if (idx >= 0 && idx < userBins.length) {
+        userBins[idx].total += 1;
+        if (likedSlugSet.has(slug)) userBins[idx].liked += 1;
+      }
+    }
+
+    // Average-rating histogram in half-star bins, restricted to films the user
+    // rated (so both histograms cover the same denominator of films).
+    const avgBins: { label: string; total: number; liked: number }[] = [];
+    for (let r = 0.5; r <= 5.0001; r += 0.5) {
+      avgBins.push({ label: r.toFixed(1), total: 0, liked: 0 });
+    }
+    let totalDelta = 0;
+    let deltaCount = 0;
+    let biggest: {
+      slug: string;
+      userRating: number;
+      avgRating: number;
+      diff: number;
+    } | null = null;
+    const underRated: {
+      slug: string;
+      userRating: number;
+      avgRating: number;
+      diff: number;
+    }[] = [];
+    const overRated: {
+      slug: string;
+      userRating: number;
+      avgRating: number;
+      diff: number;
+    }[] = [];
+    let lowestAvg: { slug: string; avg: number } | null = null;
+    let highestAvg: { slug: string; avg: number } | null = null;
+
+    for (const film of filmDetails) {
+      const userRating = ratingBySlug.get(film.slug);
+      if (userRating == null || film.avgRating == null) continue;
+      const binIdx = Math.min(
+        Math.max(Math.round(film.avgRating / 0.5) - 1, 0),
+        avgBins.length - 1
+      );
+      avgBins[binIdx].total += 1;
+      if (likedSlugSet.has(film.slug)) avgBins[binIdx].liked += 1;
+
+      const diff = userRating - film.avgRating;
+      totalDelta += diff;
+      deltaCount += 1;
+      if (biggest == null || Math.abs(diff) > Math.abs(biggest.diff)) {
+        biggest = { slug: film.slug, userRating, avgRating: film.avgRating, diff };
+      }
+      if (diff < 0) {
+        overRated.push({
+          slug: film.slug,
+          userRating,
+          avgRating: film.avgRating,
+          diff,
+        });
+      } else if (diff > 0) {
+        underRated.push({
+          slug: film.slug,
+          userRating,
+          avgRating: film.avgRating,
+          diff,
+        });
+      }
+      if (lowestAvg == null || film.avgRating < lowestAvg.avg) {
+        lowestAvg = { slug: film.slug, avg: film.avgRating };
+      }
+      if (highestAvg == null || film.avgRating > highestAvg.avg) {
+        highestAvg = { slug: film.slug, avg: film.avgRating };
+      }
+    }
+
+    if (deltaCount === 0) return null;
+
+    underRated.sort((a, b) => b.diff - a.diff);
+    overRated.sort((a, b) => a.diff - b.diff);
+
+    return {
+      userBins,
+      avgBins,
+      avgDelta: totalDelta / deltaCount,
+      biggest,
+      underRated: underRated.slice(0, 10),
+      overRated: overRated.slice(0, 10),
+      lowestAvg,
+      highestAvg,
+    };
+  }, [filmDetails, ratingBySlug, likedSlugSet]);
+
   /* ---------- match ---------- */
 
   async function handleMatch(e: React.FormEvent) {
@@ -1639,6 +2118,354 @@ function StatsView({
       {/* ---- Insights Section ---- */}
       {filmDetails.length > 0 && (
         <>
+          {/* Top Genre Combinations — pairs of genres that co-occur on the
+               same film. Derived from existing genres data, no extra scrape. */}
+          {topGenreCombinations.length > 0 && (
+            <div className="bg-card border border-card-border rounded-xl p-6">
+              <h3 className="text-lg font-semibold mb-1">
+                Top Genre Combinations
+              </h3>
+              <p className="text-muted text-xs mb-4">
+                Pairs of genres that keep showing up together in your films.
+              </p>
+              <BarChart
+                data={topGenreCombinations}
+                height={220}
+                rotateLabels
+              />
+              <p className="text-muted text-sm mt-3">
+                Your most frequent combination is{" "}
+                <span className="text-foreground font-medium">
+                  {topGenreCombinations[0].label}
+                </span>{" "}
+                with{" "}
+                <span className="text-foreground font-medium">
+                  {topGenreCombinations[0].total}
+                </span>{" "}
+                films.
+              </p>
+            </div>
+          )}
+
+          {/* Top Themes — Letterboxd-tagged themes & nanogenres with an
+               overlay line for the user's avg rating in each theme (when we
+               have ratings). Gated on any themes being scraped. */}
+          {topThemes.length > 0 && (
+            <div className="bg-card border border-card-border rounded-xl p-6">
+              <h3 className="text-lg font-semibold mb-1">Top Themes</h3>
+              <p className="text-muted text-xs mb-4">
+                What your films are actually about — from Letterboxd&apos;s
+                theme &amp; nanogenre tags.
+              </p>
+              <BarChart
+                data={topThemes.map((t) => ({
+                  label: t.label,
+                  total: t.total,
+                  liked: t.liked,
+                  overlay: t.avgUserRating,
+                }))}
+                height={260}
+                rotateLabels
+                overlayLabel="your avg rating"
+                overlayRange={[0.5, 5]}
+              />
+              {(() => {
+                // Best/worst themes by avg user rating (min 3 films so single
+                // outliers don't hijack the callouts).
+                const rated = topThemes.filter(
+                  (t) => t.avgUserRating != null && t.total >= 3
+                );
+                if (rated.length === 0) {
+                  return (
+                    <p className="text-muted text-sm mt-3">
+                      Your most-watched theme is{" "}
+                      <span className="text-foreground font-medium">
+                        {topThemes[0].label}
+                      </span>{" "}
+                      ({topThemes[0].total} films).
+                    </p>
+                  );
+                }
+                const best = [...rated].sort(
+                  (a, b) => (b.avgUserRating ?? 0) - (a.avgUserRating ?? 0)
+                )[0];
+                const worst = [...rated].sort(
+                  (a, b) => (a.avgUserRating ?? 0) - (b.avgUserRating ?? 0)
+                )[0];
+                return (
+                  <p className="text-muted text-sm mt-3">
+                    Your most-watched theme is{" "}
+                    <span className="text-foreground font-medium">
+                      {topThemes[0].label}
+                    </span>
+                    . You rated{" "}
+                    <span className="text-foreground font-medium">
+                      {best.label}
+                    </span>{" "}
+                    highest (avg {best.avgUserRating?.toFixed(2)}) and{" "}
+                    <span className="text-foreground font-medium">
+                      {worst.label}
+                    </span>{" "}
+                    lowest (avg {worst.avgUserRating?.toFixed(2)}).
+                  </p>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Popularity + Likeability — side-by-side bucket charts showing
+               how obscure / how widely-liked the user's films are on
+               Letterboxd. Both gated independently on stats data. */}
+          {(popularityBuckets || likeabilityBuckets) && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {popularityBuckets && (
+                <div className="bg-card border border-card-border rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-1">
+                    How Popular are Your Movies?
+                  </h3>
+                  <p className="text-muted text-xs mb-4">
+                    Classified by Letterboxd watch count.
+                  </p>
+                  <BarChart data={popularityBuckets} height={200} />
+                  <p className="text-muted text-sm mt-3">
+                    {popularityExtremes.mostObscure && (
+                      <>
+                        Your most obscure film is{" "}
+                        <a
+                          href={`https://letterboxd.com/film/${popularityExtremes.mostObscure.slug}/`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground font-medium hover:text-accent"
+                        >
+                          {titleBySlug.get(popularityExtremes.mostObscure.slug) ??
+                            popularityExtremes.mostObscure.slug.replace(/-/g, " ")}
+                        </a>{" "}
+                        ({popularityExtremes.mostObscure.watchedCount?.toLocaleString()}{" "}
+                        watchers).
+                      </>
+                    )}
+                    {popularityExtremes.mostPopular && (
+                      <>
+                        {" "}Most popular is{" "}
+                        <a
+                          href={`https://letterboxd.com/film/${popularityExtremes.mostPopular.slug}/`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground font-medium hover:text-accent"
+                        >
+                          {titleBySlug.get(popularityExtremes.mostPopular.slug) ??
+                            popularityExtremes.mostPopular.slug.replace(/-/g, " ")}
+                        </a>{" "}
+                        ({popularityExtremes.mostPopular.watchedCount?.toLocaleString()}).
+                      </>
+                    )}
+                  </p>
+                  <details className="mt-3 text-xs text-muted">
+                    <summary className="cursor-pointer hover:text-foreground">
+                      Popularity classification
+                    </summary>
+                    <ul className="mt-2 space-y-0.5 pl-3">
+                      <li>≤ 10,000 → very obscure</li>
+                      <li>10,001 – 100,000 → obscure</li>
+                      <li>100,001 – 1,000,000 → popular</li>
+                      <li>&gt; 1,000,000 → very popular</li>
+                    </ul>
+                  </details>
+                </div>
+              )}
+              {likeabilityBuckets && (
+                <div className="bg-card border border-card-border rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-1">
+                    How Likeable are Your Movies?
+                  </h3>
+                  <p className="text-muted text-xs mb-4">
+                    Based on Letterboxd&apos;s like-to-watch ratio.
+                  </p>
+                  <BarChart data={likeabilityBuckets} height={200} />
+                  <p className="text-muted text-sm mt-3">
+                    {popularityExtremes.mostLikeable && (
+                      <>
+                        Your most likeable film is{" "}
+                        <a
+                          href={`https://letterboxd.com/film/${popularityExtremes.mostLikeable.film.slug}/`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground font-medium hover:text-accent"
+                        >
+                          {titleBySlug.get(popularityExtremes.mostLikeable.film.slug) ??
+                            popularityExtremes.mostLikeable.film.slug.replace(/-/g, " ")}
+                        </a>{" "}
+                        ({(popularityExtremes.mostLikeable.ratio * 100).toFixed(1)}%
+                        liked).
+                      </>
+                    )}
+                    {popularityExtremes.leastLikeable && (
+                      <>
+                        {" "}Least likeable is{" "}
+                        <a
+                          href={`https://letterboxd.com/film/${popularityExtremes.leastLikeable.film.slug}/`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground font-medium hover:text-accent"
+                        >
+                          {titleBySlug.get(popularityExtremes.leastLikeable.film.slug) ??
+                            popularityExtremes.leastLikeable.film.slug.replace(/-/g, " ")}
+                        </a>{" "}
+                        ({(popularityExtremes.leastLikeable.ratio * 100).toFixed(1)}%).
+                      </>
+                    )}
+                  </p>
+                  <details className="mt-3 text-xs text-muted">
+                    <summary className="cursor-pointer hover:text-foreground">
+                      Likeability classification
+                    </summary>
+                    <ul className="mt-2 space-y-0.5 pl-3">
+                      <li>≤ 0.1 → rarely likeable</li>
+                      <li>0.1 – 0.2 → sometimes likeable</li>
+                      <li>0.2 – 0.4 → often likeable</li>
+                      <li>&gt; 0.4 → usually likeable</li>
+                    </ul>
+                  </details>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Rating comparison — user's histogram vs Letterboxd averages for
+               the same films. Gated on hasRatings so rating-free users don't
+               see empty charts. */}
+          {hasRatings && ratingComparison && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="bg-card border border-card-border rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-1">
+                  How Do You Rate Your Movies?
+                </h3>
+                <p className="text-muted text-xs mb-4">
+                  Your own star-rating distribution.
+                </p>
+                <BarChart data={ratingComparison.userBins} height={200} />
+                <p className="text-muted text-sm mt-3">
+                  On average you rate films{" "}
+                  <span className="text-foreground font-medium">
+                    {ratingComparison.avgDelta >= 0 ? "higher" : "lower"}
+                  </span>{" "}
+                  than the average Letterboxd user, by{" "}
+                  <span className="text-foreground font-medium">
+                    {Math.abs(ratingComparison.avgDelta).toFixed(2)}
+                  </span>{" "}
+                  points.
+                  {ratingComparison.biggest && (
+                    <>
+                      {" "}You differed most on{" "}
+                      <a
+                        href={`https://letterboxd.com/film/${ratingComparison.biggest.slug}/`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-foreground font-medium hover:text-accent"
+                      >
+                        {titleBySlug.get(ratingComparison.biggest.slug) ??
+                          ratingComparison.biggest.slug.replace(/-/g, " ")}
+                      </a>{" "}
+                      — you rated{" "}
+                      {ratingComparison.biggest.userRating.toFixed(1)} vs the
+                      crowd&apos;s{" "}
+                      {ratingComparison.biggest.avgRating.toFixed(2)}.
+                    </>
+                  )}
+                </p>
+                {ratingComparison.underRated.length > 0 && (
+                  <details className="mt-3 text-xs text-muted">
+                    <summary className="cursor-pointer hover:text-foreground">
+                      Movies You Under Rated
+                    </summary>
+                    <ul className="mt-2 space-y-1">
+                      {ratingComparison.overRated.map((f) => (
+                        <li key={f.slug} className="flex justify-between gap-2">
+                          <a
+                            href={`https://letterboxd.com/film/${f.slug}/`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="truncate hover:text-foreground"
+                          >
+                            {titleBySlug.get(f.slug) ?? f.slug.replace(/-/g, " ")}
+                          </a>
+                          <span className="tabular-nums shrink-0">
+                            {f.userRating.toFixed(1)} vs {f.avgRating.toFixed(2)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                {ratingComparison.overRated.length > 0 && (
+                  <details className="mt-2 text-xs text-muted">
+                    <summary className="cursor-pointer hover:text-foreground">
+                      Movies You Over Rated
+                    </summary>
+                    <ul className="mt-2 space-y-1">
+                      {ratingComparison.underRated.map((f) => (
+                        <li key={f.slug} className="flex justify-between gap-2">
+                          <a
+                            href={`https://letterboxd.com/film/${f.slug}/`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="truncate hover:text-foreground"
+                          >
+                            {titleBySlug.get(f.slug) ?? f.slug.replace(/-/g, " ")}
+                          </a>
+                          <span className="tabular-nums shrink-0">
+                            {f.userRating.toFixed(1)} vs {f.avgRating.toFixed(2)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+              <div className="bg-card border border-card-border rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-1">
+                  How Do Letterboxd Users Rate Your Movies?
+                </h3>
+                <p className="text-muted text-xs mb-4">
+                  Average ratings from the crowd for the same films.
+                </p>
+                <BarChart data={ratingComparison.avgBins} height={200} />
+                <p className="text-muted text-sm mt-3">
+                  {ratingComparison.lowestAvg && (
+                    <>
+                      Lowest crowd-rated film:{" "}
+                      <a
+                        href={`https://letterboxd.com/film/${ratingComparison.lowestAvg.slug}/`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-foreground font-medium hover:text-accent"
+                      >
+                        {titleBySlug.get(ratingComparison.lowestAvg.slug) ??
+                          ratingComparison.lowestAvg.slug.replace(/-/g, " ")}
+                      </a>{" "}
+                      ({ratingComparison.lowestAvg.avg.toFixed(2)}).
+                    </>
+                  )}
+                  {ratingComparison.highestAvg && (
+                    <>
+                      {" "}Highest:{" "}
+                      <a
+                        href={`https://letterboxd.com/film/${ratingComparison.highestAvg.slug}/`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-foreground font-medium hover:text-accent"
+                      >
+                        {titleBySlug.get(ratingComparison.highestAvg.slug) ??
+                          ratingComparison.highestAvg.slug.replace(/-/g, " ")}
+                      </a>{" "}
+                      ({ratingComparison.highestAvg.avg.toFixed(2)}).
+                    </>
+                  )}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Row 1: Cinematic Age (ratings) OR Decade Fingerprint (no ratings) + Power Duos */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* Cinematic Age — rating-weighted */}

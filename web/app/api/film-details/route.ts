@@ -15,6 +15,16 @@ interface FilmDetail {
   actors: string[];
   runtime?: number;
   countries?: string[];
+  // Themes — merged Letterboxd themes, mini-themes, and nanogenres (deduped,
+  // first-seen order). Absent for older/obscure films that Letterboxd hasn't
+  // tagged.
+  themes?: string[];
+  // Letterboxd weighted average rating, 0.5–5.0. Absent for films too new or
+  // obscure to have one.
+  avgRating?: number;
+  // Total members who logged / liked the film (from /csi/film/{slug}/stats/).
+  watchedCount?: number;
+  likesCount?: number;
   // TMDB enrichment — present when the Letterboxd page linked to TMDB and
   // the TMDB API returned usable metadata. All optional; UI degrades to text.
   tmdbId?: number;
@@ -138,6 +148,37 @@ function parseFilmPage(html: string, slug: string): FilmDetail {
     if (name && !countries.includes(name)) countries.push(name);
   }
 
+  // Themes — Letterboxd tags films with themes (/films/theme/), mini-themes
+  // (/films/mini-theme/), and nanogenres (/films/nanogenre/). Nanogenres are
+  // the fine-grained AI-clustered tags like "Twisted dark psychological
+  // thriller". We merge all three into a single themes list, deduped.
+  const themes: string[] = [];
+  const themeMatches = html.matchAll(
+    /href="\/films\/(?:theme|mini-theme|nanogenre)\/[^"]*"[^>]*>([^<]+)</g
+  );
+  for (const m of themeMatches) {
+    const name = m[1].trim();
+    if (name && !themes.includes(name)) themes.push(name);
+  }
+
+  // Average rating — Letterboxd embeds JSON-LD with "ratingValue". Some
+  // newer/obscure films have no rating yet, so this is optional.
+  let avgRating: number | undefined;
+  const ratingMatch = html.match(/"ratingValue"\s*:\s*([\d.]+)/);
+  if (ratingMatch) {
+    const parsed = parseFloat(ratingMatch[1]);
+    if (!Number.isNaN(parsed) && parsed > 0) avgRating = parsed;
+  } else {
+    // Fallback — twitter card data
+    const twitterMatch = html.match(
+      /name="twitter:data2"\s+content="([\d.]+)\s+out of 5"/
+    );
+    if (twitterMatch) {
+      const parsed = parseFloat(twitterMatch[1]);
+      if (!Number.isNaN(parsed) && parsed > 0) avgRating = parsed;
+    }
+  }
+
   // TMDB id — Letterboxd embeds an outbound link to themoviedb.org in the
   // footer of every film page. We match either /movie/ID or /tv/ID.
   let tmdbId: number | undefined;
@@ -148,7 +189,60 @@ function parseFilmPage(html: string, slug: string): FilmDetail {
     tmdbId = parseInt(tmdbMatch[2], 10);
   }
 
-  return { slug, directors, genres, actors, runtime, countries, tmdbId, tmdbType };
+  return {
+    slug,
+    directors,
+    genres,
+    actors,
+    runtime,
+    countries,
+    themes,
+    avgRating,
+    tmdbId,
+    tmdbType,
+  };
+}
+
+/**
+ * Fetch watch/like counts from Letterboxd's stats fragment. This is a separate
+ * endpoint from the film page itself and returns a small HTML fragment with
+ * tooltip-style `data-original-title` attributes containing the totals. Both
+ * counts are optional — some films may have zero likes and the regex simply
+ * won't match. Returns null on network errors so the main scrape keeps going.
+ */
+async function fetchFilmStats(
+  slug: string
+): Promise<{ watchedCount?: number; likesCount?: number } | null> {
+  try {
+    const resp = await fetch(
+      `https://letterboxd.com/csi/film/${encodeURIComponent(slug)}/stats/`,
+      { headers: HEADERS }
+    );
+    if (!resp.ok) return null;
+    const html = await resp.text();
+    if (html.includes("Just a moment")) return null;
+
+    // "Watched by 1,234,567 members" — strip commas before parsing.
+    const watchMatch = html.match(
+      /Watched by\s+<strong>([\d,]+)<\/strong>|Watched by\s+([\d,]+)\s+members?/i
+    );
+    const likeMatch = html.match(
+      /Liked by\s+<strong>([\d,]+)<\/strong>|Liked by\s+([\d,]+)\s+members?/i
+    );
+
+    const parse = (raw: string | undefined): number | undefined => {
+      if (!raw) return undefined;
+      const n = parseInt(raw.replace(/,/g, ""), 10);
+      return Number.isNaN(n) ? undefined : n;
+    };
+
+    return {
+      watchedCount: parse(watchMatch?.[1] ?? watchMatch?.[2]),
+      likesCount: parse(likeMatch?.[1] ?? likeMatch?.[2]),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -167,12 +261,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Check cache for each slug, only fetch uncached ones
+  // Check cache for each slug, only fetch uncached ones. The cache key is
+  // versioned (v2) because we added themes/avgRating/watch+like fields — older
+  // entries without them would render blank sections, so we invalidate them.
   const results: FilmDetail[] = [];
   const uncachedSlugs: string[] = [];
 
   for (const slug of slugs) {
-    const cached = getCached<FilmDetail>(`film:${slug}`);
+    const cached = getCached<FilmDetail>(`film:v2:${slug}`);
     if (cached) {
       results.push(cached);
     } else {
@@ -180,21 +276,34 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Fetch uncached film pages in parallel (max 5 concurrent). After parsing
-  // each page we ALSO call TMDB for poster/backdrop/overview in parallel —
-  // both fetches run server-side so the token never reaches the client.
+  // Fetch uncached film pages in parallel (max 5 concurrent). For each film we
+  // ALSO fire off the stats fragment fetch (watch/like counts) in parallel with
+  // the page scrape, and the TMDB metadata fetch once we have the tmdbId. All
+  // of these run server-side so tokens never reach the client.
   for (let i = 0; i < uncachedSlugs.length; i += 5) {
     const batch = uncachedSlugs.slice(i, i + 5);
     const settled = await Promise.allSettled(
       batch.map(async (slug): Promise<FilmDetail | null> => {
-        const resp = await fetch(
-          `https://letterboxd.com/film/${encodeURIComponent(slug)}/`,
-          { headers: HEADERS }
-        );
-        if (!resp.ok) return null;
-        const html = await resp.text();
+        const [pageResp, statsResult] = await Promise.all([
+          fetch(`https://letterboxd.com/film/${encodeURIComponent(slug)}/`, {
+            headers: HEADERS,
+          }),
+          fetchFilmStats(slug),
+        ]);
+        if (!pageResp.ok) return null;
+        const html = await pageResp.text();
         if (html.includes("Just a moment")) return null;
         const detail = parseFilmPage(html, slug);
+
+        // Merge stats fragment results (either field may be missing).
+        if (statsResult) {
+          if (statsResult.watchedCount != null) {
+            detail.watchedCount = statsResult.watchedCount;
+          }
+          if (statsResult.likesCount != null) {
+            detail.likesCount = statsResult.likesCount;
+          }
+        }
 
         // Enrich with TMDB metadata if Letterboxd gave us an id.
         if (detail.tmdbId && detail.tmdbType) {
@@ -211,7 +320,7 @@ export async function POST(request: NextRequest) {
     );
     for (const r of settled) {
       if (r.status === "fulfilled" && r.value) {
-        setCache(`film:${r.value.slug}`, r.value, "film-details");
+        setCache(`film:v2:${r.value.slug}`, r.value, "film-details");
         results.push(r.value);
       }
     }

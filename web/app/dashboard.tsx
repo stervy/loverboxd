@@ -52,6 +52,10 @@ interface StatsData {
     recentActivity: RSSEntry[];
     rewatchCount: number;
     allSlugs: string[];
+    // Scraped from /likes/films/ and /watchlist/. Optional so old cached
+    // payloads (pre-scrape) still deserialize — treat undefined as empty.
+    likedSlugs?: string[];
+    watchlistSlugs?: string[];
     source: "scraped" | "rss" | "csv";
   };
 }
@@ -609,33 +613,77 @@ function usersHasRatings(
 export default function Dashboard() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
+  // Tracks whether the full (non-minimal) scrape is still in flight. When
+  // true we keep a subtle progress hint on screen while the user can already
+  // see the minimal-tier data.
+  const [upgrading, setUpgrading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState<StatsData | null>(null);
+  // Monotonic request ID — each submission bumps this, and only responses
+  // whose ID matches `latestRequestRef.current` commit state. Prevents a
+  // slow first-submission full scrape from clobbering a newer submission's
+  // minimal render.
+  const latestRequestRef = useRef(0);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const name = username.trim();
     if (!name) return;
 
+    const reqId = latestRequestRef.current + 1;
+    latestRequestRef.current = reqId;
+
     setLoading(true);
+    setUpgrading(false);
     setError("");
     setData(null);
 
-    try {
-      const resp = await fetch(
-        `/api/stats?username=${encodeURIComponent(name)}`
-      );
-      const json = await resp.json();
-      if (!resp.ok) {
-        setError(json.error || "Failed to fetch stats");
-      } else {
-        setData(json);
-      }
-    } catch {
-      setError("Network error. Please try again.");
-    } finally {
+    // Kick off both requests in parallel. The minimal call returns in ~1–2s
+    // with profile + RSS-derived stats so the UI renders fast; the full call
+    // replaces that data once all the scrapes complete.
+    const minimalPromise = fetch(
+      `/api/stats?username=${encodeURIComponent(name)}&minimal=1`,
+    )
+      .then(async (resp) => {
+        const json = await resp.json();
+        return { ok: resp.ok, json };
+      })
+      .catch(() => null);
+
+    const fullPromise = fetch(
+      `/api/stats?username=${encodeURIComponent(name)}`,
+    )
+      .then(async (resp) => {
+        const json = await resp.json();
+        return { ok: resp.ok, json };
+      })
+      .catch(() => null);
+
+    // Minimal first: render something immediately. If it fails we still have
+    // the full call racing behind it, so we don't surface an error yet.
+    const minimalResult = await minimalPromise;
+    if (latestRequestRef.current !== reqId) return;
+    if (minimalResult?.ok) {
+      setData(minimalResult.json);
       setLoading(false);
+      setUpgrading(true);
     }
+
+    // Then upgrade with full scrape results. If minimal already rendered we
+    // only replace on success; if minimal failed, surface the full-call error.
+    const fullResult = await fullPromise;
+    if (latestRequestRef.current !== reqId) return;
+
+    if (fullResult?.ok) {
+      setData(fullResult.json);
+    } else if (!minimalResult?.ok) {
+      setError(fullResult?.json?.error || "Failed to fetch stats");
+    }
+    // If minimal succeeded but full failed, we keep the minimal data on
+    // screen — partial success is better than an error wipe-out.
+
+    setLoading(false);
+    setUpgrading(false);
   }
 
   return (
@@ -677,7 +725,25 @@ export default function Dashboard() {
         </div>
       )}
 
-      {data && <StatsView data={data} username={username.trim()} />}
+      {/* While the full scrape is running after the minimal tier has rendered,
+          show a slim banner so users know more data is on the way. */}
+      {upgrading && data && (
+        <div className="text-center text-xs text-muted mb-4 flex items-center justify-center gap-2">
+          <span className="inline-block animate-spin">&#9696;</span>
+          <span>
+            Loading your full film history — likes, watchlist, and everything
+            you&apos;ve watched...
+          </span>
+        </div>
+      )}
+
+      {data && (
+        <StatsView
+          data={data}
+          username={username.trim()}
+          upgrading={upgrading}
+        />
+      )}
     </div>
   );
 }
@@ -687,9 +753,15 @@ export default function Dashboard() {
 function StatsView({
   data: originalData,
   username,
+  upgrading = false,
 }: {
   data: StatsData;
   username: string;
+  // True while the parent is still waiting on the full scrape to upgrade the
+  // minimal-tier data. Used to defer film enrichment so we don't kick off a
+  // round of TMDB lookups on the minimal ~20 slugs just to clear them seconds
+  // later when the full allSlugs arrives.
+  upgrading?: boolean;
 }) {
   // CSV upload state
   const [csvFilms, setCsvFilms] = useState<CSVFilm[] | null>(null);
@@ -775,6 +847,14 @@ function StatsView({
   const enrichFilms = useCallback(async () => {
     const slugs = stats.allSlugs;
     if (!slugs || slugs.length === 0) return;
+    // During the two-tier fetch the minimal (RSS-based) payload arrives
+    // first with a small allSlugs; then the full payload arrives and supersedes
+    // it. Running enrichment twice would clear filmDetails mid-scroll and
+    // flicker the leaderboards, so we defer enrichment until the
+    // scrape-backed data lands. When scraping failed and RSS is all we'll
+    // ever get, we still want to enrich — detect that by watching for the
+    // upgrading flag to go false.
+    if (stats.source === "rss" && csvFilms === null && upgrading) return;
 
     setEnriching(true);
     setEnrichProgress(0);
@@ -806,7 +886,7 @@ function StatsView({
     setFilmDetails([...allDetails]);
 
     setEnriching(false);
-  }, [stats.allSlugs]);
+  }, [stats.allSlugs, stats.source, csvFilms, upgrading]);
 
   useEffect(() => {
     enrichFilms();
@@ -1191,31 +1271,41 @@ function StatsView({
     return { avgYear: avg, decade, spread, count: years.length };
   }, [hasRatings, csvFilms, stats.topRated]);
 
-  // Watchlist vs. Watched "completionist" stat — only meaningful with CSV data
-  // that includes the watchlist.csv column. Null otherwise.
+  // Watchlist vs. Watched "completionist" stat — sourced from the CSV export
+  // (preferred, since a one-shot upload is usually more complete) or falling
+  // back to the scraped likes/watchlist slugs from /api/stats. Null only when
+  // neither source produced data.
   const watchlistStats = useMemo(() => {
-    if (!csvFilms) return null;
-    const watchlistSlugs = new Set(
-      csvFilms.filter((f) => f.watchlisted).map((f) => f.slug)
-    );
-    if (watchlistSlugs.size === 0) return null;
-    // Watchlist entries are films NOT yet watched, so no overlap by construction
-    // unless the user has since watched them and left them on the list. Report
-    // total watchlist size and estimate "completion" as (watched ∩ historic watchlist),
-    // but since we only have current state, surface the count as-is.
+    if (csvFilms) {
+      const watchlistSlugs = new Set(
+        csvFilms.filter((f) => f.watchlisted).map((f) => f.slug)
+      );
+      if (watchlistSlugs.size === 0) return null;
+      return {
+        watchlistSize: watchlistSlugs.size,
+        likedSize: csvFilms.filter((f) => f.liked).length,
+      };
+    }
+    // Scraped fallback. Either set being non-empty is enough to surface the
+    // panel; the other just renders 0.
+    const scrapedLiked = stats.likedSlugs ?? [];
+    const scrapedWatchlist = stats.watchlistSlugs ?? [];
+    if (scrapedLiked.length === 0 && scrapedWatchlist.length === 0) return null;
     return {
-      watchlistSize: watchlistSlugs.size,
-      likedSize: csvFilms.filter((f) => f.liked).length,
+      watchlistSize: scrapedWatchlist.length,
+      likedSize: scrapedLiked.length,
     };
-  }, [csvFilms]);
+  }, [csvFilms, stats.likedSlugs, stats.watchlistSlugs]);
 
   // "Liked Films Club" — when we have likes but no ratings, analyze what the
-  // user's hearted films have in common (genres, directors, actors).
+  // user's hearted films have in common (genres, directors, actors). Sourced
+  // from CSV if uploaded, otherwise from the scraped likes slugs.
   const likedFilmsClub = useMemo(() => {
     if (hasRatings) return null;
-    if (!csvFilms) return null;
-    const likedSlugs = new Set(
-      csvFilms.filter((f) => f.liked).map((f) => f.slug)
+    const likedSlugs = new Set<string>(
+      csvFilms
+        ? csvFilms.filter((f) => f.liked).map((f) => f.slug)
+        : stats.likedSlugs ?? []
     );
     if (likedSlugs.size === 0) return null;
 
@@ -1235,7 +1325,7 @@ function StatsView({
       topDirectors: [...dirCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
       topActors: [...actCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
     };
-  }, [hasRatings, csvFilms, filmDetails]);
+  }, [hasRatings, csvFilms, stats.likedSlugs, filmDetails]);
 
   // Collect every person name that appears in the three avatar-enabled cards
   // (Power Duos, 5-Star Club, Liked Films Club) and look them all up in a
@@ -1364,8 +1454,11 @@ function StatsView({
 
       {/* ── CSV Upload / Data Source Banner ── */}
 
-      {/* Prominent upload prompt when data is limited (RSS only) */}
-      {stats.source === "rss" && (
+      {/* Prominent upload prompt when data is limited (RSS only). Suppressed
+          while `upgrading` is true since the minimal tier transiently reports
+          source="rss"; we only want this banner when scraping has actually
+          finished and come back empty. */}
+      {stats.source === "rss" && !upgrading && (
         <div className="bg-card border border-accent/40 rounded-xl p-6">
           <h3 className="text-lg font-semibold mb-1">
             Get your complete stats
@@ -1458,8 +1551,8 @@ function StatsView({
       {stats.source === "scraped" && (
         <details className="bg-card border border-card-border rounded-xl">
           <summary className="px-6 py-4 text-sm text-muted cursor-pointer hover:text-foreground transition-colors">
-            Have your Letterboxd data export? Upload the ZIP for complete stats
-            (including likes &amp; watchlist — great if you don&apos;t rate)
+            Have your Letterboxd data export? Upload the ZIP for an even
+            richer view — your data always wins over scraped data
           </summary>
           <div className="px-6 pb-5">
             <ol className="text-sm space-y-1.5 mb-4 text-muted">

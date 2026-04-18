@@ -1,6 +1,10 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
 
+// Match scrapes both the user's and the friend's full film lists plus taste
+// signals — worst case is double the stats route's load. Same 60s cap.
+export const maxDuration = 60;
+
 const HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",

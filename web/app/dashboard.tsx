@@ -253,7 +253,7 @@ function PieChart({
   });
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex flex-col items-center gap-4">
       <svg
         width={size}
         height={size}
@@ -264,9 +264,9 @@ function PieChart({
           <path key={s.name} d={s.d} fill={s.color} />
         ))}
       </svg>
-      <ul className="flex-1 min-w-0 space-y-1 text-xs">
+      <ul className="w-full grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
         {slices.map((s) => (
-          <li key={s.name} className="flex items-center gap-2">
+          <li key={s.name} className="flex items-center gap-2 min-w-0">
             <span
               className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
               style={{ backgroundColor: s.color }}
@@ -274,7 +274,7 @@ function PieChart({
             <span className="flex-1 truncate" title={s.name}>
               {s.name}
             </span>
-            <span className="text-muted tabular-nums">
+            <span className="text-muted tabular-nums shrink-0">
               {Math.round(s.pct * 100)}%
             </span>
           </li>

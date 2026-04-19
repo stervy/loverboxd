@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
+import { fetchLetterboxd } from "../_lib/fetch-letterboxd";
 
 // Raise Vercel's default 10s function timeout. A single stats call does up to
 // four paginated scrapes (ratings + likes + watchlist + watched); power users
@@ -7,31 +8,30 @@ import { getCached, setCache } from "../cache";
 // 60s is the Pro-tier default cap.
 export const maxDuration = 60;
 
-const HEADERS = {
+// Kept for the RSS fetch below, which intentionally stays on a direct route
+// since feeds.letterboxd.com isn't CF-gated.
+const DIRECT_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   Accept:
     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "X-Requested-With": "XMLHttpRequest",
   Referer: "https://letterboxd.com/",
 };
 
 const REQUEST_DELAY = 1000; // ms between requests to avoid Cloudflare rate limiting
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Fetch a letterboxd.com path through the shared helper, which routes via the
+ * CF Worker proxy when configured. Local wrapper keeps the old (url, cookies)
+ * signature the scrape loops were already using — converts absolute URL → path.
+ */
 async function fetchPage(url: string, cookies: string[]): Promise<string> {
-  const cookieHeader = cookies.join("; ");
-  const resp = await fetch(url, {
-    headers: { ...HEADERS, ...(cookieHeader ? { Cookie: cookieHeader } : {}) },
-    redirect: "follow",
-  });
-  // Capture set-cookie headers
-  const setCookie = resp.headers.getSetCookie?.() ?? [];
-  for (const c of setCookie) {
-    cookies.push(c.split(";")[0]);
-  }
-  return resp.text();
+  const path = url.startsWith("https://letterboxd.com")
+    ? url.slice("https://letterboxd.com".length)
+    : url;
+  return fetchLetterboxd(path, cookies);
 }
 
 function parseProfile(html: string, username: string) {
@@ -363,7 +363,7 @@ export async function GET(request: NextRequest) {
     // 2. Fetch RSS feed (always works, no Cloudflare)
     const rssResp = await fetch(
       `https://letterboxd.com/${username}/rss/`,
-      { headers: HEADERS }
+      { headers: DIRECT_HEADERS }
     );
     const rssXml = await rssResp.text();
     const rssEntries = parseRSS(rssXml);

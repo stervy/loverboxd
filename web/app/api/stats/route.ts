@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
 import { fetchLetterboxd } from "../_lib/fetch-letterboxd";
+import demoData from "./demo-data.json";
 
 // Raise Vercel's default 10s function timeout. A single stats call does up to
 // four paginated scrapes (ratings + likes + watchlist + watched); power users
@@ -358,6 +359,14 @@ export async function GET(request: NextRequest) {
   const username = request.nextUrl.searchParams.get("username");
   if (!username || !/^[a-zA-Z0-9_-]+$/.test(username)) {
     return Response.json({ error: "Invalid username" }, { status: 400 });
+  }
+
+  // `?demo=1` returns a checked-in snapshot of a real response. Useful for
+  // iterating on the UI without burning ScraperAPI credits — no scraping,
+  // no cache reads/writes, no timeouts. The fixture is a real stervy profile
+  // scrape with 772 films so every panel has enough data to render.
+  if (request.nextUrl.searchParams.get("demo") === "1") {
+    return Response.json(demoData);
   }
 
   // When the client sets ?minimal=1 it's doing a two-tier fetch: render fast

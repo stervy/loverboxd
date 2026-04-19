@@ -625,6 +625,24 @@ export default function Dashboard() {
   // minimal render.
   const latestRequestRef = useRef(0);
 
+  /**
+   * When the page URL has `?demo=1`, forward that flag to every /api/stats
+   * call so the server returns a static fixture (no scraping, no credits).
+   * Lets us iterate on the UI without hitting ScraperAPI.
+   */
+  const demoMode = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("demo") === "1";
+  }, []);
+  const demoParam = demoMode ? "&demo=1" : "";
+
+  // In demo mode, prefill the input with a sensible default so the user
+  // doesn't have to type anything — just click Go (or hit enter).
+  useEffect(() => {
+    if (demoMode && !username) setUsername("demo");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoMode]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const name = username.trim();
@@ -642,7 +660,7 @@ export default function Dashboard() {
     // with profile + RSS-derived stats so the UI renders fast; the full call
     // replaces that data once all the scrapes complete.
     const minimalPromise = fetch(
-      `/api/stats?username=${encodeURIComponent(name)}&minimal=1`,
+      `/api/stats?username=${encodeURIComponent(name)}&minimal=1${demoParam}`,
     )
       .then(async (resp) => {
         const json = await resp.json();
@@ -651,7 +669,7 @@ export default function Dashboard() {
       .catch(() => null);
 
     const fullPromise = fetch(
-      `/api/stats?username=${encodeURIComponent(name)}`,
+      `/api/stats?username=${encodeURIComponent(name)}${demoParam}`,
     )
       .then(async (resp) => {
         const json = await resp.json();

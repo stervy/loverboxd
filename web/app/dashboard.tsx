@@ -634,18 +634,20 @@ export default function Dashboard() {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("demo") === "1";
   }, []);
-  const demoParam = demoMode ? "&demo=1" : "";
 
-  // In demo mode, prefill the input with a sensible default so the user
+  // In demo mode (URL landed with ?demo=1), prefill the input so the user
   // doesn't have to type anything — just click Go (or hit enter).
   useEffect(() => {
     if (demoMode && !username) setUsername("demo");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [demoMode]);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const name = username.trim();
+  /**
+   * Shared submission logic used by both the text-input form and the "Use
+   * demo" button. The `forceDemo` override exists so the button can trigger
+   * demo mode without the user needing to land on ?demo=1 first.
+   */
+  async function runStatsFetch(name: string, forceDemo: boolean) {
     if (!name) return;
 
     const reqId = latestRequestRef.current + 1;
@@ -656,11 +658,14 @@ export default function Dashboard() {
     setError("");
     setData(null);
 
+    const useDemo = forceDemo || demoMode;
+    const demoQs = useDemo ? "&demo=1" : "";
+
     // Kick off both requests in parallel. The minimal call returns in ~1–2s
     // with profile + RSS-derived stats so the UI renders fast; the full call
     // replaces that data once all the scrapes complete.
     const minimalPromise = fetch(
-      `/api/stats?username=${encodeURIComponent(name)}&minimal=1${demoParam}`,
+      `/api/stats?username=${encodeURIComponent(name)}&minimal=1${demoQs}`,
     )
       .then(async (resp) => {
         const json = await resp.json();
@@ -669,7 +674,7 @@ export default function Dashboard() {
       .catch(() => null);
 
     const fullPromise = fetch(
-      `/api/stats?username=${encodeURIComponent(name)}${demoParam}`,
+      `/api/stats?username=${encodeURIComponent(name)}${demoQs}`,
     )
       .then(async (resp) => {
         const json = await resp.json();
@@ -704,12 +709,27 @@ export default function Dashboard() {
     setUpgrading(false);
   }
 
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    runStatsFetch(username.trim(), false);
+  }
+
+  /**
+   * "Use demo" button: forces demo mode without needing ?demo=1 in the URL.
+   * Sets the input to "demo" (cosmetic, so the StatsView header reads right)
+   * and kicks off the demo fetch directly.
+   */
+  function handleDemoClick() {
+    setUsername("demo");
+    runStatsFetch("demo", true);
+  }
+
   return (
     <div>
       {/* Search Form */}
       <form
         onSubmit={handleSubmit}
-        className="flex gap-3 max-w-md mx-auto mb-10"
+        className="flex gap-3 max-w-md mx-auto mb-3"
       >
         <input
           type="text"
@@ -730,6 +750,20 @@ export default function Dashboard() {
           )}
         </button>
       </form>
+
+      {/* Demo button — renders a checked-in fixture profile so visitors can
+          see what the results page looks like without entering a username.
+          Also lets us iterate on the UI without burning ScraperAPI credits. */}
+      <div className="flex justify-center mb-10">
+        <button
+          type="button"
+          onClick={handleDemoClick}
+          disabled={loading}
+          className="text-sm text-muted hover:text-accent underline underline-offset-4 decoration-dotted transition-colors disabled:opacity-50"
+        >
+          or see a demo profile
+        </button>
+      </div>
 
       {error && (
         <div className="text-center text-red-400 mb-6">{error}</div>

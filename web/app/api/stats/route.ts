@@ -19,8 +19,10 @@ const DIRECT_HEADERS = {
   Referer: "https://letterboxd.com/",
 };
 
-const REQUEST_DELAY = 1000; // ms between requests to avoid Cloudflare rate limiting
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Pagination is now parallelized in chunks (see PARALLEL_CHUNK below), so the
+// old per-request sleep for CF politeness isn't needed — when routed through
+// the ScraperAPI-backed Worker, that service handles rate limiting; when
+// hitting letterboxd.com directly, the chunk size itself caps concurrency.
 
 /**
  * Fetch a letterboxd.com path through the shared helper, which routes via the
@@ -99,25 +101,56 @@ function parseGridSlugs(html: string): string[] {
  * slug. Mirrors the approach in /api/match/route.ts so behavior stays
  * consistent — same 50-page cap, same CF-block bailout.
  */
+/**
+ * How many pages to fetch concurrently. ScraperAPI's free plan allows ~10
+ * concurrent requests; 5 is safely under and still gives us ~5× wall-clock
+ * speedup versus sequential. Adjust up if we move to a bigger plan.
+ */
+const PARALLEL_CHUNK = 5;
+
 async function fetchGridSlugs(
   username: string,
   pathSegment: "likes/films" | "watchlist" | "films",
   cookies: string[]
 ): Promise<string[]> {
   const all: string[] = [];
+  const maxPages = 50; // ~3600 films — enough for all but extreme power users
   try {
-    for (let page = 1; page <= 50; page++) {
-      if (page > 1) await sleep(REQUEST_DELAY);
-      const html = await fetchPage(
-        `https://letterboxd.com/${username}/${pathSegment}/page/${page}/`,
-        cookies
+    for (let startPage = 1; startPage <= maxPages; startPage += PARALLEL_CHUNK) {
+      const pageNums = Array.from(
+        { length: Math.min(PARALLEL_CHUNK, maxPages - startPage + 1) },
+        (_, i) => startPage + i,
       );
-      if (html.includes("Just a moment")) break;
-      const slugs = parseGridSlugs(html);
-      if (slugs.length === 0) break;
-      all.push(...slugs);
-      // Fewer than a full page means we've reached the end
-      if (slugs.length < 72) break;
+      const htmls = await Promise.all(
+        pageNums.map((p) =>
+          fetchPage(
+            `https://letterboxd.com/${username}/${pathSegment}/page/${p}/`,
+            cookies,
+          ),
+        ),
+      );
+
+      // Walk the chunk results in order; a page with fewer than a full 72
+      // items (or zero / CF block) means we've reached the tail — accept the
+      // slugs we got up to that point and stop.
+      let hitEnd = false;
+      for (const html of htmls) {
+        if (html.includes("Just a moment")) {
+          hitEnd = true;
+          break;
+        }
+        const slugs = parseGridSlugs(html);
+        if (slugs.length === 0) {
+          hitEnd = true;
+          break;
+        }
+        all.push(...slugs);
+        if (slugs.length < 72) {
+          hitEnd = true;
+          break;
+        }
+      }
+      if (hitEnd) break;
     }
   } catch {
     // Return whatever we managed to scrape
@@ -391,20 +424,32 @@ export async function GET(request: NextRequest) {
       scrapedFilms = cachedRatings;
     } else {
       scrapedFilms = [];
+      const maxPages = 50;
       try {
-        for (let page = 1; page <= 100; page++) {
-          if (page > 1) await sleep(REQUEST_DELAY);
-
-          const html = await fetchPage(
-            `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
-            cookies
+        outer: for (
+          let startPage = 1;
+          startPage <= maxPages;
+          startPage += PARALLEL_CHUNK
+        ) {
+          const pageNums = Array.from(
+            { length: Math.min(PARALLEL_CHUNK, maxPages - startPage + 1) },
+            (_, i) => startPage + i,
           );
-          if (html.includes("Just a moment")) break;
-          const films = parseRatedFilms(html);
-          if (films.length === 0) break;
-          scrapedFilms.push(...films);
-          // Fewer than a full page means we've reached the end
-          if (films.length < 72) break;
+          const htmls = await Promise.all(
+            pageNums.map((p) =>
+              fetchPage(
+                `https://letterboxd.com/${username}/films/ratings/page/${p}/`,
+                cookies,
+              ),
+            ),
+          );
+          for (const html of htmls) {
+            if (html.includes("Just a moment")) break outer;
+            const films = parseRatedFilms(html);
+            if (films.length === 0) break outer;
+            scrapedFilms.push(...films);
+            if (films.length < 72) break outer;
+          }
         }
       } catch {
         // Cloudflare blocked — fall through to RSS-based stats

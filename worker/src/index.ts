@@ -25,6 +25,14 @@
 export interface Env {
   /** Shared secret required on every request. Set via `wrangler secret put`. */
   SCRAPER_SECRET: string;
+  /**
+   * Optional ScraperAPI key. When set, paths that Letterboxd's Cloudflare WAF
+   * challenges (ratings/likes/films grid) route through ScraperAPI so a real
+   * browser can solve the challenge. Paths that CF doesn't challenge (profile,
+   * watchlist, film details, RSS) still hit letterboxd.com directly to avoid
+   * burning credits.
+   */
+  SCRAPER_API_KEY?: string;
 }
 
 const LETTERBOXD_ORIGIN = "https://letterboxd.com";
@@ -74,9 +82,21 @@ export default {
     const target = `${LETTERBOXD_ORIGIN}${path}`;
     const callerCookie = request.headers.get("Cookie");
 
+    // Route CF-challenged paths (ratings/likes/films grid) through ScraperAPI
+    // when a key is configured. ScraperAPI runs a real browser farm that
+    // solves CF's v2 managed challenges — plain fetch(), whether from here
+    // or Vercel, gets a 403 "Just a moment…" page on these URLs.
+    const shouldProxy = env.SCRAPER_API_KEY && needsChallengeProxy(path);
+    const fetchUrl = shouldProxy
+      ? scraperApiUrl(target, env.SCRAPER_API_KEY!)
+      : target;
+
     let resp: Response;
     try {
-      resp = await fetch(target, {
+      resp = await fetch(fetchUrl, {
+        // ScraperAPI ignores most headers on its side and re-sends its own
+        // browser fingerprint, but passing them along for direct fetches
+        // (and as hints to SA) is harmless.
         headers: {
           ...BROWSER_HEADERS,
           ...(callerCookie ? { Cookie: callerCookie } : {}),
@@ -124,6 +144,40 @@ function plain(body: string, status: number): Response {
     status,
     headers: { "Content-Type": "text/plain; charset=utf-8" },
   });
+}
+
+/**
+ * Which Letterboxd paths to route through ScraperAPI. Patterns match the
+ * ones CF serves `challenge-platform` / managed-challenge pages on — empirically
+ * verified from inside a Worker and from Vercel (both hit the same 403).
+ *
+ * Keeping this list narrow matters: ScraperAPI's free tier is 1000 credits/mo
+ * and each request is 1 credit. Paths not in this list hit letterboxd.com
+ * directly at zero cost.
+ */
+function needsChallengeProxy(path: string): boolean {
+  // `/<user>/films/` (watched grid) — includes pagination
+  if (/^\/[^/]+\/films\/(?:page\/\d+\/)?$/.test(path)) return true;
+  // `/<user>/films/ratings/page/N/`
+  if (/^\/[^/]+\/films\/ratings\//.test(path)) return true;
+  // `/<user>/likes/films/` + pagination
+  if (/^\/[^/]+\/likes\/films\//.test(path)) return true;
+  // Diary pages (in case we scrape them in the future)
+  if (/^\/[^/]+\/films\/diary\//.test(path)) return true;
+  return false;
+}
+
+/**
+ * Build the ScraperAPI fetch URL. Uses their plain mode (1 credit/request);
+ * not ultra_premium, since plain mode already solves the Letterboxd-level
+ * challenge in our testing.
+ */
+function scraperApiUrl(targetUrl: string, apiKey: string): string {
+  const params = new URLSearchParams({
+    api_key: apiKey,
+    url: targetUrl,
+  });
+  return `http://api.scraperapi.com/?${params.toString()}`;
 }
 
 /**

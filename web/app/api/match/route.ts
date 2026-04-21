@@ -500,8 +500,15 @@ export async function GET(request: NextRequest) {
     const dataLimited =
       userData.source === "rss" || friendData.source === "rss";
 
-    // If either side has no ratings at all, fall back to taste-mode comparison.
-    if (userMap.size === 0 || friendMap.size === 0) {
+    // Try rating-mode first. Fall back to taste mode if either side has no
+    // ratings, or if the rated sets don't overlap — in which case watched/
+    // liked/watchlist signals still produce a meaningful comparison.
+    const ratingResult =
+      userMap.size > 0 && friendMap.size > 0
+        ? compareUsers(friend, userMap, friendMap, dataLimited)
+        : null;
+
+    if (!ratingResult || ratingResult.overlapCount === 0) {
       const [userTaste, friendTaste] = await Promise.all([
         (async () => ({
           watched: await fetchAllWatchedSlugs(username),
@@ -517,7 +524,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    return Response.json(compareUsers(friend, userMap, friendMap, dataLimited));
+    return Response.json(ratingResult);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });
@@ -574,12 +581,15 @@ export async function POST(request: NextRequest) {
     const friendMap = buildRatingMap(friendData.films);
     const dataLimited = friendData.source === "rss";
 
-    // Taste mode: the user uploaded a CSV with zero ratings (or very few),
-    // OR the friend has no public ratings. Use watched/liked/watchlist signals.
-    const userHasRatings = userMap.size > 0;
-    const friendHasRatings = friendMap.size > 0;
+    // Try rating-mode first. Fall back to taste mode if either user lacks
+    // ratings, or if the rated sets don't overlap — watched/liked/watchlist
+    // signals still produce a meaningful comparison.
+    const ratingResult =
+      userMap.size > 0 && friendMap.size > 0
+        ? compareUsers(friend, userMap, friendMap, dataLimited)
+        : null;
 
-    if (!userHasRatings || !friendHasRatings) {
+    if (!ratingResult || ratingResult.overlapCount === 0) {
       const userWatched = new Set(
         userFilms.map((f) => f.slug).filter(Boolean)
       );
@@ -601,7 +611,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return Response.json(compareUsers(friend, userMap, friendMap, dataLimited));
+    return Response.json(ratingResult);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });

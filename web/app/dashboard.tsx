@@ -1849,6 +1849,8 @@ function StatsView({
   /* ---------- render ---------- */
   return (
     <div className="space-y-8">
+      <StickyNav chapters={CHAPTERS} />
+
       {/* Profile Header */}
       <div className="bg-card border border-card-border rounded-xl p-6">
         <div className="flex items-start justify-between flex-wrap gap-4">
@@ -2128,6 +2130,9 @@ function StatsView({
         </div>
       )}
 
+      <Chapter chapter={CHAPTERS[0]}>
+        <ChapterHero chapter={CHAPTERS[0]} content={chapterContent["ch-1"]} />
+
       {/* Rating Distribution — only meaningful if the user rates films. */}
       {hasRatings && ratingEntries.length > 0 && (
         <div className="bg-card border border-card-border rounded-xl p-6">
@@ -2159,6 +2164,11 @@ function StatsView({
           </p>
         </div>
       )}
+
+      </Chapter>
+
+      <Chapter chapter={CHAPTERS[1]}>
+        <ChapterHero chapter={CHAPTERS[1]} content={chapterContent["ch-2"]} />
 
       {/* Most Watched Directors / Genres / Actors */}
       {(stats.allSlugs?.length > 0) && (
@@ -2206,6 +2216,8 @@ function StatsView({
         </div>
       )}
 
+      </Chapter>
+
       <div className={`transition-opacity ${enriching ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
         <div className="w-full max-w-md mx-auto">
           <div className="flex items-center justify-center gap-2 mb-2">
@@ -2227,6 +2239,9 @@ function StatsView({
       {/* ---- Insights Section ---- */}
       {filmDetails.length > 0 && (
         <>
+          <Chapter chapter={CHAPTERS[2]}>
+            <ChapterHero chapter={CHAPTERS[2]} content={chapterContent["ch-3"]} />
+
           {/* Top Genre Combinations — pairs of genres that co-occur on the
                same film. Derived from existing genres data, no extra scrape. */}
           {topGenreCombinations.length > 0 && (
@@ -2574,6 +2589,11 @@ function StatsView({
               </div>
             </div>
           )}
+
+          </Chapter>
+
+          <Chapter chapter={CHAPTERS[3]}>
+            <ChapterHero chapter={CHAPTERS[3]} content={chapterContent["ch-4"]} />
 
           {/* Row 1: Cinematic Age (ratings) OR Decade Fingerprint (no ratings) + Power Duos */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -2989,8 +3009,12 @@ function StatsView({
               </div>
             </div>
           )}
+          </Chapter>
         </>
       )}
+
+      <Chapter chapter={CHAPTERS[4]}>
+        <ChapterHero chapter={CHAPTERS[4]} content={chapterContent["ch-5"]} />
 
       {/* Decade Distribution */}
       {decadeEntries.length > 0 && (
@@ -3079,6 +3103,11 @@ function StatsView({
         </div>
       )}
 
+      </Chapter>
+
+      <Chapter chapter={CHAPTERS[5]}>
+        <ChapterHero chapter={CHAPTERS[5]} content={chapterContent["ch-6"]} />
+
       {/* Find Your Match */}
       <div className="bg-card border border-card-border rounded-xl p-6">
         <h3 className="text-lg font-semibold mb-2">Find Your Match</h3>
@@ -3141,6 +3170,7 @@ function StatsView({
           </div>
         )}
       </div>
+      </Chapter>
     </div>
   );
 }

@@ -11,9 +11,9 @@ import type { ChapterDef } from "../components/Chapter";
 
 export const CHAPTERS: ChapterDef[] = [
   { id: "ch-1", number: "01", title: "How You Rate" },
-  { id: "ch-2", number: "02", title: "Your People" },
+  { id: "ch-2", number: "02", title: "Who You Watch" },
   { id: "ch-3", number: "03", title: "Your Taste" },
-  { id: "ch-4", number: "04", title: "Scale & Reach" },
+  { id: "ch-4", number: "04", title: "Deeper Patterns" },
   { id: "ch-5", number: "05", title: "Your Films" },
   { id: "ch-6", number: "06", title: "Find Your Match" },
 ];
@@ -70,8 +70,8 @@ export function buildChapterContent(inputs: ChapterInputs): Record<ChapterId, Ch
     "ch-4": {
       subtitle:
         inputs.hoursWatched > 0
-          ? `${inputs.hoursWatched} hours across ${inputs.countryCount} countries.`
-          : "The scope of your watching.",
+          ? `${inputs.hoursWatched} hours across ${inputs.countryCount} countries — the patterns underneath.`
+          : "The patterns underneath.",
       posters: inputs.longestFilmPoster ? [inputs.longestFilmPoster] : [],
     },
     "ch-5": {

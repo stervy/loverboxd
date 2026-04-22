@@ -2150,6 +2150,8 @@ function StatsView({
         </div>
       )}
 
+      <PosterRibbon posters={fourStarPosters} />
+
       {/* Rating-free user banner — explains why the "star-based" cards are gone
            and reassures them that the match + insights still work. */}
       {!hasRatings && stats.totalFilms > 0 && (
@@ -2215,6 +2217,8 @@ function StatsView({
           </div>
         </div>
       )}
+
+      <PosterRibbon posters={chapterContent["ch-2"].posters} />
 
       </Chapter>
 
@@ -3064,6 +3068,8 @@ function StatsView({
           </div>
         </div>
       )}
+
+      <PosterRibbon posters={chapterContent["ch-5"].posters} />
 
       {/* Recent Activity */}
       {stats.recentActivity.length > 0 && (

@@ -1147,6 +1147,9 @@ function StatsView({
     for (const film of filmDetails) {
       for (const dir of film.directors) {
         for (const act of film.actors) {
+          // Skip self-pairs (same person credited as both director and actor
+          // on the same film) — "Tarantino + Tarantino" isn't a duo.
+          if (dir === act) continue;
           const key = `${dir}|||${act}`;
           const existing = pairSlugs.get(key);
           if (existing) existing.push(film.slug);

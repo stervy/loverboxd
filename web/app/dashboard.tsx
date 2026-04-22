@@ -3,6 +3,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Image from "next/image";
 import { type CSVFilm, extractRatingsFromFile } from "./csv-utils";
+import { Chapter } from "./components/Chapter";
+import { ChapterHero } from "./components/ChapterHero";
+import { PosterRibbon } from "./components/PosterRibbon";
+import { StickyNav } from "./components/StickyNav";
+import { CHAPTERS, buildChapterContent } from "./lib/chapter-data";
 
 /** Build a TMDB CDN URL from a poster path. Sizes: w92, w154, w185, w342, w500, w780, original. */
 function tmdbImg(
@@ -1184,6 +1189,107 @@ function StatsView({
       .filter(([, v]) => v.count >= 3)
       .map(([genre, v]) => ({ genre, avg: Math.round((v.sum / v.count) * 100) / 100, count: v.count }))
       .sort((a, b) => b.avg - a.avg);
+  }, [filmDetails, ratingBySlug]);
+
+  // Derive content (subtitle + mural poster paths) for each chapter hero.
+  // Pulls from already-computed stats and filmDetails, so no new data work.
+  const chapterContent = useMemo(() => {
+    const posterBySlug = new Map<string, string>();
+    for (const f of filmDetails) {
+      if (f.posterPath) posterBySlug.set(f.slug, f.posterPath);
+    }
+
+    const fiveStarPosters: string[] = [];
+    for (const [slug, rating] of ratingBySlug) {
+      if (rating >= 5) {
+        const p = posterBySlug.get(slug);
+        if (p) fiveStarPosters.push(p);
+      }
+    }
+
+    const ratings = [...ratingBySlug.values()].sort((a, b) => a - b);
+    const p25Stars = ratings.length ? ratings[Math.floor(ratings.length * 0.25)] : 0;
+    const p75Stars = ratings.length ? ratings[Math.floor(ratings.length * 0.75)] : 0;
+
+    // topDirectors / topGenres are tuple arrays: [name, count][].
+    const topDirectorName = topDirectors[0]?.[0] ?? null;
+    const topDirectorFilmCount = topDirectors[0]?.[1] ?? 0;
+    const topDirectorPosters: string[] = [];
+    if (topDirectorName) {
+      for (const f of filmDetails) {
+        if (f.directors.includes(topDirectorName) && f.posterPath) {
+          topDirectorPosters.push(f.posterPath);
+        }
+      }
+    }
+
+    const topGenreName = topGenres[0]?.[0] ?? null;
+    const topGenreCount = topGenres[0]?.[1] ?? 0;
+    const totalGenreCount = topGenres.reduce((sum, g) => sum + g[1], 0);
+    const topGenrePercent = totalGenreCount > 0 ? Math.round((topGenreCount / totalGenreCount) * 100) : 0;
+    const topGenrePosters: string[] = [];
+    if (topGenreName) {
+      for (const f of filmDetails) {
+        if (f.genres.includes(topGenreName) && f.posterPath) {
+          topGenrePosters.push(f.posterPath);
+        }
+      }
+    }
+
+    let totalMinutes = 0;
+    let longestFilmPoster: string | null = null;
+    let longestFilmRuntime = 0;
+    const countries = new Set<string>();
+    for (const f of filmDetails) {
+      if (typeof f.runtime === "number") totalMinutes += f.runtime;
+      for (const c of f.countries ?? []) countries.add(c);
+      if ((f.runtime ?? 0) > longestFilmRuntime && f.posterPath) {
+        longestFilmRuntime = f.runtime ?? 0;
+        longestFilmPoster = f.posterPath;
+      }
+    }
+    const hoursWatched = Math.round(totalMinutes / 60);
+
+    const topRatedPosters: string[] = [];
+    for (const tr of stats.topRated ?? []) {
+      const p = posterBySlug.get(tr.slug);
+      if (p) topRatedPosters.push(p);
+    }
+
+    return buildChapterContent({
+      totalRated: ratingBySlug.size,
+      p25Stars,
+      p75Stars,
+      topDirectorName,
+      topDirectorFilmCount,
+      topGenreName,
+      topGenrePercent,
+      hoursWatched,
+      countryCount: countries.size,
+      topRatedCount: Math.min(10, topRatedPosters.length),
+      recentCount: (stats.recentActivity ?? []).length,
+      fiveStarPosters,
+      topDirectorPosters,
+      topGenrePosters,
+      longestFilmPoster,
+      topRatedPosters,
+    });
+  }, [filmDetails, ratingBySlug, topDirectors, topGenres, stats.topRated, stats.recentActivity]);
+
+  // 4-star posters for Ch 1 ribbon (between Rating Distribution and Popularity).
+  const fourStarPosters = useMemo(() => {
+    const posterBySlug = new Map<string, string>();
+    for (const f of filmDetails) {
+      if (f.posterPath) posterBySlug.set(f.slug, f.posterPath);
+    }
+    const out: string[] = [];
+    for (const [slug, rating] of ratingBySlug) {
+      if (rating >= 4 && rating < 5) {
+        const p = posterBySlug.get(slug);
+        if (p) out.push(p);
+      }
+    }
+    return out.slice(0, 5);
   }, [filmDetails, ratingBySlug]);
 
   // Highest-rated directors & actors — Bayesian-shrunk avg rating per person.

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useCountUp } from "./hooks/useCountUp";
 import Image from "next/image";
 import { type CSVFilm, extractRatingsFromFile } from "./csv-utils";
 import { Chapter } from "./components/Chapter";
@@ -1846,6 +1847,42 @@ function StatsView({
 
   const peopleMap = usePersonLookup(peopleToLookup);
 
+  const avgRatingCounter = useCountUp(stats.avgRating ?? 0, { decimals: 2 });
+  const cinematicAgeCounter = useCountUp(cinematicAge?.age ?? 0);
+  const hoursWatchedCounter = useCountUp(runtimeStats?.totalHours ?? 0);
+
+  // Reveal cards on scroll. Runs whenever the set of rendered cards may have
+  // changed (initial mount, after enrichment, after CSV upload).
+  useEffect(() => {
+    const cards = Array.from(
+      document.querySelectorAll<HTMLElement>(".bg-card.border-card-border.rounded-xl.p-6")
+    );
+    if (cards.length === 0) return;
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      cards.forEach((c) => c.classList.add("reveal", "revealed"));
+      return;
+    }
+
+    // Elements that have already revealed once keep the class — don't re-hide them.
+    const pending = cards.filter((c) => !c.classList.contains("revealed"));
+    pending.forEach((c) => c.classList.add("reveal"));
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("revealed");
+            observer.unobserve(entry.target);
+          }
+        }
+      },
+      { threshold: 0.1, rootMargin: "0px 0px -5% 0px" }
+    );
+    pending.forEach((c) => observer.observe(c));
+    return () => observer.disconnect();
+  }, [filmDetails.length, stats.source, hasRatings]);
+
   /* ---------- render ---------- */
   return (
     <div className="space-y-8">
@@ -1907,8 +1944,11 @@ function StatsView({
         {hasRatings ? (
           <>
             <div className="bg-card border border-card-border rounded-xl p-5 text-center">
-              <div className="text-3xl font-bold text-accent">
-                {stats.avgRating}
+              <div
+                ref={avgRatingCounter.ref as React.RefObject<HTMLDivElement>}
+                className="text-3xl font-bold text-accent"
+              >
+                {avgRatingCounter.formatted}
               </div>
               <div className="text-muted text-sm mt-1">Average Rating</div>
             </div>
@@ -2605,7 +2645,12 @@ function StatsView({
             {hasRatings && cinematicAge && (
               <div className="bg-card border border-card-border rounded-xl p-6 text-center">
                 <h3 className="text-lg font-semibold mb-3">Your Cinematic Age</h3>
-                <div className="text-5xl font-bold text-accent mb-2">{cinematicAge.age}</div>
+                <div
+                  ref={cinematicAgeCounter.ref as React.RefObject<HTMLDivElement>}
+                  className="text-5xl font-bold text-accent mb-2"
+                >
+                  {cinematicAgeCounter.formatted}
+                </div>
                 <p className="text-muted text-sm">
                   Your taste was shaped in the <span className="text-foreground font-medium">{cinematicAge.decade}</span>
                 </p>
@@ -2971,7 +3016,12 @@ function StatsView({
                 <h3 className="text-lg font-semibold mb-4">Runtime Stats</h3>
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <div className="text-center">
-                    <div className="text-2xl font-bold text-accent">{runtimeStats.totalHours.toLocaleString()}</div>
+                    <div
+                      ref={hoursWatchedCounter.ref as React.RefObject<HTMLDivElement>}
+                      className="text-2xl font-bold text-accent"
+                    >
+                      {Number(hoursWatchedCounter.formatted).toLocaleString()}
+                    </div>
                     <div className="text-xs text-muted">hours watched</div>
                   </div>
                   <div className="text-center">

@@ -25,8 +25,9 @@ export function useCountUp(
     if (!el) return;
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setValue(target);
-      return;
+      // Defer one frame to avoid a synchronous setState-in-effect cascade.
+      const raf = requestAnimationFrame(() => setValue(target));
+      return () => cancelAnimationFrame(raf);
     }
 
     const duration = opts?.durationMs ?? 800;

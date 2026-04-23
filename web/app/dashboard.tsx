@@ -1,8 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useCountUp } from "./hooks/useCountUp";
 import Image from "next/image";
 import { type CSVFilm, extractRatingsFromFile } from "./csv-utils";
+import { Chapter } from "./components/Chapter";
+import { ChapterHero } from "./components/ChapterHero";
+import { PosterRibbon } from "./components/PosterRibbon";
+import { StickyNav } from "./components/StickyNav";
+import { CHAPTERS, buildChapterContent } from "./lib/chapter-data";
 
 /** Build a TMDB CDN URL from a poster path. Sizes: w92, w154, w185, w342, w500, w780, original. */
 function tmdbImg(
@@ -1147,6 +1153,9 @@ function StatsView({
     for (const film of filmDetails) {
       for (const dir of film.directors) {
         for (const act of film.actors) {
+          // Skip self-pairs (same person credited as both director and actor
+          // on the same film) — "Tarantino + Tarantino" isn't a duo.
+          if (dir === act) continue;
           const key = `${dir}|||${act}`;
           const existing = pairSlugs.get(key);
           if (existing) existing.push(film.slug);
@@ -1181,6 +1190,107 @@ function StatsView({
       .filter(([, v]) => v.count >= 3)
       .map(([genre, v]) => ({ genre, avg: Math.round((v.sum / v.count) * 100) / 100, count: v.count }))
       .sort((a, b) => b.avg - a.avg);
+  }, [filmDetails, ratingBySlug]);
+
+  // Derive content (subtitle + mural poster paths) for each chapter hero.
+  // Pulls from already-computed stats and filmDetails, so no new data work.
+  const chapterContent = useMemo(() => {
+    const posterBySlug = new Map<string, string>();
+    for (const f of filmDetails) {
+      if (f.posterPath) posterBySlug.set(f.slug, f.posterPath);
+    }
+
+    const fiveStarPosters: string[] = [];
+    for (const [slug, rating] of ratingBySlug) {
+      if (rating >= 5) {
+        const p = posterBySlug.get(slug);
+        if (p) fiveStarPosters.push(p);
+      }
+    }
+
+    const ratings = [...ratingBySlug.values()].sort((a, b) => a - b);
+    const p25Stars = ratings.length ? ratings[Math.floor(ratings.length * 0.25)] : 0;
+    const p75Stars = ratings.length ? ratings[Math.floor(ratings.length * 0.75)] : 0;
+
+    // topDirectors / topGenres are tuple arrays: [name, count][].
+    const topDirectorName = topDirectors[0]?.[0] ?? null;
+    const topDirectorFilmCount = topDirectors[0]?.[1] ?? 0;
+    const topDirectorPosters: string[] = [];
+    if (topDirectorName) {
+      for (const f of filmDetails) {
+        if (f.directors.includes(topDirectorName) && f.posterPath) {
+          topDirectorPosters.push(f.posterPath);
+        }
+      }
+    }
+
+    const topGenreName = topGenres[0]?.[0] ?? null;
+    const topGenreCount = topGenres[0]?.[1] ?? 0;
+    const totalGenreCount = topGenres.reduce((sum, g) => sum + g[1], 0);
+    const topGenrePercent = totalGenreCount > 0 ? Math.round((topGenreCount / totalGenreCount) * 100) : 0;
+    const topGenrePosters: string[] = [];
+    if (topGenreName) {
+      for (const f of filmDetails) {
+        if (f.genres.includes(topGenreName) && f.posterPath) {
+          topGenrePosters.push(f.posterPath);
+        }
+      }
+    }
+
+    let totalMinutes = 0;
+    let longestFilmPoster: string | null = null;
+    let longestFilmRuntime = 0;
+    const countries = new Set<string>();
+    for (const f of filmDetails) {
+      if (typeof f.runtime === "number") totalMinutes += f.runtime;
+      for (const c of f.countries ?? []) countries.add(c);
+      if ((f.runtime ?? 0) > longestFilmRuntime && f.posterPath) {
+        longestFilmRuntime = f.runtime ?? 0;
+        longestFilmPoster = f.posterPath;
+      }
+    }
+    const hoursWatched = Math.round(totalMinutes / 60);
+
+    const topRatedPosters: string[] = [];
+    for (const tr of stats.topRated ?? []) {
+      const p = posterBySlug.get(tr.slug);
+      if (p) topRatedPosters.push(p);
+    }
+
+    return buildChapterContent({
+      totalRated: ratingBySlug.size,
+      p25Stars,
+      p75Stars,
+      topDirectorName,
+      topDirectorFilmCount,
+      topGenreName,
+      topGenrePercent,
+      hoursWatched,
+      countryCount: countries.size,
+      topRatedCount: Math.min(10, topRatedPosters.length),
+      recentCount: (stats.recentActivity ?? []).length,
+      fiveStarPosters,
+      topDirectorPosters,
+      topGenrePosters,
+      longestFilmPoster,
+      topRatedPosters,
+    });
+  }, [filmDetails, ratingBySlug, topDirectors, topGenres, stats.topRated, stats.recentActivity]);
+
+  // 4-star posters for Ch 1 ribbon (between Rating Distribution and Popularity).
+  const fourStarPosters = useMemo(() => {
+    const posterBySlug = new Map<string, string>();
+    for (const f of filmDetails) {
+      if (f.posterPath) posterBySlug.set(f.slug, f.posterPath);
+    }
+    const out: string[] = [];
+    for (const [slug, rating] of ratingBySlug) {
+      if (rating >= 4 && rating < 5) {
+        const p = posterBySlug.get(slug);
+        if (p) out.push(p);
+      }
+    }
+    return out.slice(0, 5);
   }, [filmDetails, ratingBySlug]);
 
   // Highest-rated directors & actors — Bayesian-shrunk avg rating per person.
@@ -1737,9 +1847,47 @@ function StatsView({
 
   const peopleMap = usePersonLookup(peopleToLookup);
 
+  const avgRatingCounter = useCountUp(stats.avgRating ?? 0, { decimals: 2 });
+  const cinematicAgeCounter = useCountUp(cinematicAge?.age ?? 0);
+  const hoursWatchedCounter = useCountUp(runtimeStats?.totalHours ?? 0);
+
+  // Reveal cards on scroll. Runs whenever the set of rendered cards may have
+  // changed (initial mount, after enrichment, after CSV upload).
+  useEffect(() => {
+    const cards = Array.from(
+      document.querySelectorAll<HTMLElement>(".bg-card.border-card-border.rounded-xl.p-6")
+    );
+    if (cards.length === 0) return;
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      cards.forEach((c) => c.classList.add("reveal", "revealed"));
+      return;
+    }
+
+    // Elements that have already revealed once keep the class — don't re-hide them.
+    const pending = cards.filter((c) => !c.classList.contains("revealed"));
+    pending.forEach((c) => c.classList.add("reveal"));
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("revealed");
+            observer.unobserve(entry.target);
+          }
+        }
+      },
+      { threshold: 0.1, rootMargin: "0px 0px -5% 0px" }
+    );
+    pending.forEach((c) => observer.observe(c));
+    return () => observer.disconnect();
+  }, [filmDetails.length, stats.source, hasRatings]);
+
   /* ---------- render ---------- */
   return (
     <div className="space-y-8">
+      <StickyNav chapters={CHAPTERS} />
+
       {/* Profile Header */}
       <div className="bg-card border border-card-border rounded-xl p-6">
         <div className="flex items-start justify-between flex-wrap gap-4">
@@ -1796,8 +1944,11 @@ function StatsView({
         {hasRatings ? (
           <>
             <div className="bg-card border border-card-border rounded-xl p-5 text-center">
-              <div className="text-3xl font-bold text-accent">
-                {stats.avgRating}
+              <div
+                ref={avgRatingCounter.ref as React.RefObject<HTMLDivElement>}
+                className="text-3xl font-bold text-accent"
+              >
+                {avgRatingCounter.formatted}
               </div>
               <div className="text-muted text-sm mt-1">Average Rating</div>
             </div>
@@ -2019,6 +2170,9 @@ function StatsView({
         </div>
       )}
 
+      <Chapter chapter={CHAPTERS[0]}>
+        <ChapterHero chapter={CHAPTERS[0]} content={chapterContent["ch-1"]} />
+
       {/* Rating Distribution — only meaningful if the user rates films. */}
       {hasRatings && ratingEntries.length > 0 && (
         <div className="bg-card border border-card-border rounded-xl p-6">
@@ -2036,6 +2190,8 @@ function StatsView({
         </div>
       )}
 
+      <PosterRibbon posters={fourStarPosters} />
+
       {/* Rating-free user banner — explains why the "star-based" cards are gone
            and reassures them that the match + insights still work. */}
       {!hasRatings && stats.totalFilms > 0 && (
@@ -2050,6 +2206,11 @@ function StatsView({
           </p>
         </div>
       )}
+
+      </Chapter>
+
+      <Chapter chapter={CHAPTERS[1]}>
+        <ChapterHero chapter={CHAPTERS[1]} content={chapterContent["ch-2"]} />
 
       {/* Most Watched Directors / Genres / Actors */}
       {(stats.allSlugs?.length > 0) && (
@@ -2097,6 +2258,10 @@ function StatsView({
         </div>
       )}
 
+      <PosterRibbon posters={chapterContent["ch-2"].posters} />
+
+      </Chapter>
+
       <div className={`transition-opacity ${enriching ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
         <div className="w-full max-w-md mx-auto">
           <div className="flex items-center justify-center gap-2 mb-2">
@@ -2118,6 +2283,9 @@ function StatsView({
       {/* ---- Insights Section ---- */}
       {filmDetails.length > 0 && (
         <>
+          <Chapter chapter={CHAPTERS[2]}>
+            <ChapterHero chapter={CHAPTERS[2]} content={chapterContent["ch-3"]} />
+
           {/* Top Genre Combinations — pairs of genres that co-occur on the
                same film. Derived from existing genres data, no extra scrape. */}
           {topGenreCombinations.length > 0 && (
@@ -2466,13 +2634,23 @@ function StatsView({
             </div>
           )}
 
+          </Chapter>
+
+          <Chapter chapter={CHAPTERS[3]}>
+            <ChapterHero chapter={CHAPTERS[3]} content={chapterContent["ch-4"]} />
+
           {/* Row 1: Cinematic Age (ratings) OR Decade Fingerprint (no ratings) + Power Duos */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* Cinematic Age — rating-weighted */}
             {hasRatings && cinematicAge && (
               <div className="bg-card border border-card-border rounded-xl p-6 text-center">
                 <h3 className="text-lg font-semibold mb-3">Your Cinematic Age</h3>
-                <div className="text-5xl font-bold text-accent mb-2">{cinematicAge.age}</div>
+                <div
+                  ref={cinematicAgeCounter.ref as React.RefObject<HTMLDivElement>}
+                  className="text-5xl font-bold text-accent mb-2"
+                >
+                  {cinematicAgeCounter.formatted}
+                </div>
                 <p className="text-muted text-sm">
                   Your taste was shaped in the <span className="text-foreground font-medium">{cinematicAge.decade}</span>
                 </p>
@@ -2838,7 +3016,12 @@ function StatsView({
                 <h3 className="text-lg font-semibold mb-4">Runtime Stats</h3>
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <div className="text-center">
-                    <div className="text-2xl font-bold text-accent">{runtimeStats.totalHours.toLocaleString()}</div>
+                    <div
+                      ref={hoursWatchedCounter.ref as React.RefObject<HTMLDivElement>}
+                      className="text-2xl font-bold text-accent"
+                    >
+                      {Number(hoursWatchedCounter.formatted).toLocaleString()}
+                    </div>
                     <div className="text-xs text-muted">hours watched</div>
                   </div>
                   <div className="text-center">
@@ -2880,8 +3063,12 @@ function StatsView({
               </div>
             </div>
           )}
+          </Chapter>
         </>
       )}
+
+      <Chapter chapter={CHAPTERS[4]}>
+        <ChapterHero chapter={CHAPTERS[4]} content={chapterContent["ch-5"]} />
 
       {/* Decade Distribution */}
       {decadeEntries.length > 0 && (
@@ -2932,6 +3119,8 @@ function StatsView({
         </div>
       )}
 
+      <PosterRibbon posters={chapterContent["ch-5"].posters} />
+
       {/* Recent Activity */}
       {stats.recentActivity.length > 0 && (
         <div className="bg-card border border-card-border rounded-xl p-6">
@@ -2969,6 +3158,11 @@ function StatsView({
           </div>
         </div>
       )}
+
+      </Chapter>
+
+      <Chapter chapter={CHAPTERS[5]}>
+        <ChapterHero chapter={CHAPTERS[5]} content={chapterContent["ch-6"]} />
 
       {/* Find Your Match */}
       <div className="bg-card border border-card-border rounded-xl p-6">
@@ -3032,6 +3226,7 @@ function StatsView({
           </div>
         )}
       </div>
+      </Chapter>
     </div>
   );
 }

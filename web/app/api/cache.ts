@@ -8,8 +8,15 @@ interface CacheEntry<T> {
 
 const store = new Map<string, CacheEntry<unknown>>();
 
-const SCRAPED_TTL = 60 * 60 * 1000; // 1 hour for full scraped data
-const RSS_TTL = 5 * 60 * 1000; // 5 minutes for RSS-only (so it retries scraping sooner)
+// 24h for scraped data. Letterboxd profiles don't change minute-to-minute,
+// and scraping burns ScraperAPI credits — 24h cuts the credit cost of repeat
+// views of the same profile by ~24× vs. the old 1h. Note: the cache is still
+// per-Vercel-container and in-memory, so cold starts reset it; 24h is an
+// upper bound, not a guarantee.
+const SCRAPED_TTL = 24 * 60 * 60 * 1000;
+// Short TTL on RSS-only fallbacks so we don't lock in degraded data when
+// scraping was temporarily blocked.
+const RSS_TTL = 5 * 60 * 1000;
 const FILM_DETAILS_TTL = 24 * 60 * 60 * 1000; // 24 hours for film metadata (rarely changes)
 
 export function getCached<T>(key: string): T | null {

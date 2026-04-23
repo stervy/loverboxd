@@ -1,13 +1,19 @@
 import { NextRequest } from "next/server";
 import { getCached, setCache } from "../cache";
+import { fetchLetterboxd } from "../_lib/fetch-letterboxd";
 
-const HEADERS = {
+// Match scrapes both the user's and the friend's full film lists plus taste
+// signals — worst case is double the stats route's load. Same 60s cap.
+export const maxDuration = 60;
+
+// Kept for the RSS fallback fetch below, which stays direct because
+// Letterboxd's RSS feed isn't CF-gated.
+const DIRECT_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   Accept:
     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "X-Requested-With": "XMLHttpRequest",
   Referer: "https://letterboxd.com/",
 };
 
@@ -124,13 +130,9 @@ function parseRSSForRatings(xml: string): RatedFilm[] {
 async function warmupSession(username: string): Promise<string[]> {
   const cookies: string[] = [];
   try {
-    const warmup = await fetch(`https://letterboxd.com/${username}/`, {
-      headers: HEADERS,
-      redirect: "follow",
-    });
-    const setCookie = warmup.headers.getSetCookie?.() ?? [];
-    for (const c of setCookie) cookies.push(c.split(";")[0]);
-    await warmup.text();
+    // `fetchLetterboxd` mutates the cookies array with any Set-Cookie values
+    // from the response, so we don't need to capture them manually here.
+    await fetchLetterboxd(`/${username}/`, cookies);
   } catch {
     // Continue without warmup
   }
@@ -151,20 +153,10 @@ async function fetchGridSlugs(
   try {
     for (let page = 1; page <= 50; page++) {
       if (page > 1) await sleep(REQUEST_DELAY);
-      const resp = await fetch(
-        `https://letterboxd.com/${username}/${pathSegment}/page/${page}/`,
-        {
-          headers: {
-            ...HEADERS,
-            ...(cookies.length > 0 ? { Cookie: cookies.join("; ") } : {}),
-          },
-          redirect: "follow",
-        }
+      const html = await fetchLetterboxd(
+        `/${username}/${pathSegment}/page/${page}/`,
+        cookies,
       );
-      const setCookie = resp.headers.getSetCookie?.() ?? [];
-      for (const c of setCookie) cookies.push(c.split(";")[0]);
-
-      const html = await resp.text();
       if (html.includes("Just a moment")) break;
 
       const films = parseFilmGridFromHTML(html);
@@ -228,24 +220,10 @@ async function fetchAllRatedFilms(
     for (let page = 1; page <= 100; page++) {
       if (page > 1) await sleep(REQUEST_DELAY);
 
-      const resp = await fetch(
-        `https://letterboxd.com/${username}/films/ratings/page/${page}/`,
-        {
-          headers: {
-            ...HEADERS,
-            ...(cookies.length > 0 ? { Cookie: cookies.join("; ") } : {}),
-          },
-          redirect: "follow",
-        }
+      const html = await fetchLetterboxd(
+        `/${username}/films/ratings/page/${page}/`,
+        cookies,
       );
-
-      // Capture cookies for session continuity
-      const setCookie = resp.headers.getSetCookie?.() ?? [];
-      for (const c of setCookie) {
-        cookies.push(c.split(";")[0]);
-      }
-
-      const html = await resp.text();
 
       // Cloudflare block — fall back to RSS
       if (html.includes("Just a moment")) break;
@@ -271,7 +249,7 @@ async function fetchAllRatedFilms(
   // Fallback: use RSS feed (~50 most recent entries)
   try {
     const rssResp = await fetch(`https://letterboxd.com/${username}/rss/`, {
-      headers: HEADERS,
+      headers: DIRECT_HEADERS,
     });
     const rssXml = await rssResp.text();
     const result = { films: parseRSSForRatings(rssXml), source: "rss" as const };
@@ -522,8 +500,15 @@ export async function GET(request: NextRequest) {
     const dataLimited =
       userData.source === "rss" || friendData.source === "rss";
 
-    // If either side has no ratings at all, fall back to taste-mode comparison.
-    if (userMap.size === 0 || friendMap.size === 0) {
+    // Try rating-mode first. Fall back to taste mode if either side has no
+    // ratings, or if the rated sets don't overlap — in which case watched/
+    // liked/watchlist signals still produce a meaningful comparison.
+    const ratingResult =
+      userMap.size > 0 && friendMap.size > 0
+        ? compareUsers(friend, userMap, friendMap, dataLimited)
+        : null;
+
+    if (!ratingResult || ratingResult.overlapCount === 0) {
       const [userTaste, friendTaste] = await Promise.all([
         (async () => ({
           watched: await fetchAllWatchedSlugs(username),
@@ -539,7 +524,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    return Response.json(compareUsers(friend, userMap, friendMap, dataLimited));
+    return Response.json(ratingResult);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });
@@ -596,12 +581,15 @@ export async function POST(request: NextRequest) {
     const friendMap = buildRatingMap(friendData.films);
     const dataLimited = friendData.source === "rss";
 
-    // Taste mode: the user uploaded a CSV with zero ratings (or very few),
-    // OR the friend has no public ratings. Use watched/liked/watchlist signals.
-    const userHasRatings = userMap.size > 0;
-    const friendHasRatings = friendMap.size > 0;
+    // Try rating-mode first. Fall back to taste mode if either user lacks
+    // ratings, or if the rated sets don't overlap — watched/liked/watchlist
+    // signals still produce a meaningful comparison.
+    const ratingResult =
+      userMap.size > 0 && friendMap.size > 0
+        ? compareUsers(friend, userMap, friendMap, dataLimited)
+        : null;
 
-    if (!userHasRatings || !friendHasRatings) {
+    if (!ratingResult || ratingResult.overlapCount === 0) {
       const userWatched = new Set(
         userFilms.map((f) => f.slug).filter(Boolean)
       );
@@ -623,7 +611,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return Response.json(compareUsers(friend, userMap, friendMap, dataLimited));
+    return Response.json(ratingResult);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });
